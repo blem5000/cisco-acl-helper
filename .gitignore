@@ -1,0 +1,19 @@
+# secrets / local runtime files - NEVER commit
+devices.enc
+config.json
+ssh_debug.log
+ssh_probe.log
+
+# build artefacts
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+
+# dev / OS
+.venv/
+venv/
+.vscode/
+Desktop.ini
+Thumbs.db
