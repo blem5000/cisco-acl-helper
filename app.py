@@ -509,6 +509,14 @@ class App(tk.Tk):
             command=lambda: save_ssh_debug(self.ssh_debug_var.get()))
         self.chk_ssh_debug.pack(anchor="w", padx=14, pady=(14, 0))
 
+        # tab order: search, generator, devices, subnets, settings
+        for _tab in (self.tab_search, self.tab_gen, self.tab_dev,
+                     self.tab_sub, self.tab_set):
+            self.nb.forget(_tab)
+        for _tab in (self.tab_search, self.tab_gen, self.tab_dev,
+                     self.tab_sub, self.tab_set):
+            self.nb.add(_tab, text="")
+
         # status bar
         self.status = tk.StringVar(value="")
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w").pack(
