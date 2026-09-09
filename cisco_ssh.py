@@ -7,9 +7,9 @@ Why "Authentication failed: transport shut down or saw EOF" happens on Cisco:
   1. Wrong username/password (most common).
   2. Device requires keyboard-interactive auth (TACACS/AAA) instead of plain
      password auth -> handled here with a fallback.
-  3. Old IOS only offers legacy kex/hostkey (diffie-hellman-group1-sha1,
-     diffie-hellman-group14-sha1, ssh-rsa SHA1) which Paramiko >= 3 does NOT
-     offer by default -> re-enabled below.
+  3. Old IOS offers only legacy kex/hostkey (diffie-hellman-group14-sha1,
+     ssh-rsa SHA1) which Paramiko >= 3 neither offers nor implements ->
+     vendored in ssh_legacy (offered last, used only as last resort).
 """
 
 from __future__ import annotations
@@ -27,45 +27,7 @@ from paramiko.ssh_exception import (
     SSHException,
 )
 
-# Legacy algorithms still used by older IOS / IOS-XE devices.
-_LEGACY_KEX = (
-    "diffie-hellman-group14-sha1",
-    "diffie-hellman-group1-sha1",
-    "diffie-hellman-group-exchange-sha1",
-)
-_LEGACY_KEYS = ("ssh-rsa",)
-
-
-def _enable_legacy_cisco_algos() -> None:
-    """Make Paramiko *offer* legacy Cisco kex/hostkey types.
-
-    Newer Paramiko versions removed group1-sha1 / group14-sha1 / ssh-rsa
-    from the default preferred lists, so handshakes with old Cisco boxes
-    die with EOF. The algorithm implementations still exist - we just put
-    them back at the end of the offer lists (modern algos stay preferred).
-    """
-    try:
-        from paramiko.transport import Transport
-
-        kex = list(Transport._preferred_kex)
-        changed = False
-        for a in _LEGACY_KEX:
-            if a not in kex:
-                kex.append(a)
-                changed = True
-        if changed:
-            Transport._preferred_kex = tuple(kex)
-
-        keys = list(Transport._preferred_keys)
-        changed = False
-        for a in _LEGACY_KEYS:
-            if a not in keys:
-                keys.append(a)
-                changed = True
-        if changed:
-            Transport._preferred_keys = tuple(keys)
-    except Exception:
-        pass  # never break the app because of the patch
+from ssh_legacy import enable_legacy_cisco_algos as _enable_legacy_cisco_algos
 
 
 _enable_legacy_cisco_algos()
