@@ -282,6 +282,7 @@ class App(tk.Tk):
         self.generating = False
         self.tracking = False
         self._track_cont: dict | None = None  # effective creds for Continue
+        self._track_stop = threading.Event()
         self._gen_start_vars: dict[str, tk.StringVar] = {}
         self._gen_auto: dict[str, int] = {}
         self._gen_taken: dict[str, set[int]] = {}
@@ -514,6 +515,9 @@ class App(tk.Tk):
         tbtns.pack(fill="x", padx=10, pady=(0, 8))
         self.btn_track = ttk.Button(tbtns, text="", command=self.trace_ip)
         self.btn_track.pack(side="left", padx=(0, 6))
+        self.btn_track_stop = ttk.Button(tbtns, text="", command=self.stop_track,
+                                         state="disabled")
+        self.btn_track_stop.pack(side="left", padx=6)
         self.btn_track_clear = ttk.Button(tbtns, text="", command=self.clear_track)
         self.btn_track_clear.pack(side="left", padx=6)
         self.btn_track_cont = ttk.Button(tbtns, text="", command=self.continue_track)
@@ -638,6 +642,7 @@ class App(tk.Tk):
         self.lbl_track_ip.configure(text=S["track_ip_label"])
         self.lbl_track_dev.configure(text=S["track_dev_label"])
         self.btn_track.configure(text=S["track_btn"])
+        self.btn_track_stop.configure(text=S["stop_btn"])
         self.btn_track_clear.configure(text=S["clear_btn"])
         self.chk_track_parent.configure(text=S["track_parent_creds"])
         self.lbl_track_results.configure(text=S["results_label"])
@@ -1125,6 +1130,15 @@ class App(tk.Tk):
         self.txt_track.insert("1.0", content)
         self.txt_track.configure(state="disabled")
 
+    def _append_track_text(self, chunk: str):
+        self.txt_track.configure(state="normal")
+        self.txt_track.insert(tk.END, chunk)
+        self.txt_track.see(tk.END)
+        self.txt_track.configure(state="disabled")
+
+    def stop_track(self):
+        self._track_stop.set()
+
     def clear_track(self):
         self._track_cont = None
         self.btn_track_cont.pack_forget()
@@ -1160,8 +1174,19 @@ class App(tk.Tk):
         self.btn_track_cont.pack_forget()
         self._set_track_text("")
         self.tracking = True
+        self._track_stop.clear()
         self.btn_track.configure(state="disabled")
-        self.prog_track.configure(maximum=3, value=0)
+        self.btn_track_stop.configure(state="normal")
+        auto = self.track_parent_var.get()
+        if auto:
+            self.prog_track.configure(mode="indeterminate")
+            self.prog_track.start(12)
+        else:
+            try:
+                self.prog_track.stop()
+            except tk.TclError:
+                pass
+            self.prog_track.configure(mode="determinate", maximum=3, value=0)
         self.status.set(self.T("track_working").format(ip=ip, host=dev["host"]))
         snapshot = [dict(d) for d in self.devices]
         threading.Thread(target=self._track_worker,
@@ -1184,68 +1209,96 @@ class App(tk.Tk):
         return out.get(cmd, "")
 
     def _track_worker(self, ip: str, dev: dict, devices: list,
-                      use_parent: bool, debug_log):
-        host = dev["host"]
-        lines = [f"=== {host} : {ip} ==="]
-        cont: dict | None = None
-        try:
-            arp_out = self._track_run(dev, f"show ip arp {ip}", debug_log)
-            self.msg_queue.put(("track_prog", 1))
-            arp = track.parse_arp(arp_out, ip)
-            mac, origin = track.resolve_mac(arp, dev.get("mac", ""))
-            if mac is None:
-                if arp and arp.get("incomplete"):
-                    lines.append(self.T("track_arp_incomplete").format(ip=ip))
+                      use_parent: bool, debug_log, max_hops: int = 10):
+        auto = use_parent  # toggle ON = chain automatically, no button
+        stop = self._track_stop
+        visited: set = set()
+        cur = dict(dev)
+        hop = 0
+        while True:
+            if stop.is_set():
+                self.msg_queue.put(("track_chunk", (None, self.T("track_stopped") + "\n")))
+                break
+            host = cur.get("host", "?")
+            if host in visited:
+                self.msg_queue.put(("track_chunk",
+                                    (host, self.T("track_loop").format(host=host) + "\n")))
+                break
+            if hop >= max_hops:
+                self.msg_queue.put(("track_chunk",
+                                    (host, self.T("track_max_hops").format(n=max_hops) + "\n")))
+                break
+            visited.add(host)
+            hop += 1
+            lines = [f"=== {host} : {ip} ==="]
+            cont: dict | None = None
+            try:
+                arp_out = self._track_run(cur, f"show ip arp {ip}", debug_log)
+                self.msg_queue.put(("track_prog", 1))
+                arp = track.parse_arp(arp_out, ip)
+                mac, origin = track.resolve_mac(arp, cur.get("mac", ""))
+                if mac is None:
+                    if arp and arp.get("incomplete"):
+                        lines.append(self.T("track_arp_incomplete").format(ip=ip))
+                    else:
+                        lines.append(self.T("track_arp_none").format(ip=ip, host=host))
+                    self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                    break
+                if origin == "fresh":
+                    lines.append(f"ARP: {ip} -> {mac} ({arp.get('interface', '')})".rstrip())
                 else:
-                    lines.append(self.T("track_arp_none").format(ip=ip, host=host))
-                self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", None)))
-                return
-            if origin == "fresh":
-                lines.append(f"ARP: {ip} -> {mac} ({arp.get('interface', '')})".rstrip())
-            else:
-                lines.append(self.T("track_mac_parent").format(host=host, mac=mac))
+                    lines.append(self.T("track_mac_parent").format(host=host, mac=mac))
 
-            mac_out = self._track_run(dev, f"show mac address-table address {mac}",
-                                      debug_log)
-            self.msg_queue.put(("track_prog", 2))
-            entries = track.parse_mac_table(mac_out, mac)
-            if not entries:
-                lines.append(self.T("track_mac_none").format(mac=mac, host=host))
-                self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", None)))
-                return
-            port = entries[0]["port"]
-            for e in entries:
-                vlan = f"VLAN {e['vlan']}, " if e.get("vlan") else ""
-                lines.append(f"MAC: {mac} -> {e['port']} ({vlan}{e.get('type', '')})".rstrip())
+                mac_out = self._track_run(cur, f"show mac address-table address {mac}",
+                                          debug_log)
+                self.msg_queue.put(("track_prog", 2))
+                entries = track.parse_mac_table(mac_out, mac)
+                if not entries:
+                    lines.append(self.T("track_mac_none").format(mac=mac, host=host))
+                    self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                    break
+                port = entries[0]["port"]
+                for e in entries:
+                    vlan = f"VLAN {e['vlan']}, " if e.get("vlan") else ""
+                    lines.append(f"MAC: {mac} -> {e['port']} ({vlan}{e.get('type', '')})".rstrip())
 
-            cdp_out = self._track_run(dev, "show cdp neighbors detail", debug_log)
-            self.msg_queue.put(("track_prog", 3))
-            nb = track.find_cdp_on_port(track.parse_cdp_detail(cdp_out), port)
-            if not nb:
-                lines.append(self.T("track_cdp_none").format(port=port, host=host))
+                cdp_out = self._track_run(cur, "show cdp neighbors detail", debug_log)
+                self.msg_queue.put(("track_prog", 3))
+                nb = track.find_cdp_on_port(track.parse_cdp_detail(cdp_out), port)
+                if not nb:
+                    lines.append(self.T("track_cdp_none").format(port=port, host=host))
+                else:
+                    plat = f" [{nb['platform']}]" if nb.get("platform") else ""
+                    lines.append(f"CDP: {port} -> {nb['device']} ({nb.get('ip', '?')})"
+                                 f" | remote {nb.get('remote', '?')}{plat}")
+                    listed = track.match_known_device(devices, nb)
+                    if listed is not None:
+                        cont = dict(listed)
+                        if use_parent:
+                            # log in with the parent (current) device credentials
+                            for k in ("username", "password", "enable", "port"):
+                                cont[k] = cur.get(k, cont.get(k))
+                    elif use_parent and nb.get("ip"):
+                        # neighbor not in the list: reach it with parent creds
+                        cont = {"hostname": nb.get("device", ""), "host": nb["ip"],
+                                "username": cur.get("username", ""),
+                                "password": cur.get("password", ""),
+                                "enable": cur.get("enable", ""),
+                                "port": cur.get("port", 22)}
+                    if cont is not None:
+                        cont["mac"] = mac  # carry over for the next hop
+            except Exception as e:
+                lines.append(f"*** ERROR on {host}: {e} ***")
+                self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                break
             else:
-                plat = f" [{nb['platform']}]" if nb.get("platform") else ""
-                lines.append(f"CDP: {port} -> {nb['device']} ({nb.get('ip', '?')})"
-                             f" | remote {nb.get('remote', '?')}{plat}")
-                listed = track.match_known_device(devices, nb)
-                if listed is not None:
-                    cont = dict(listed)
-                    if use_parent:
-                        # log in with the parent (current) device credentials
-                        for k in ("username", "password", "enable", "port"):
-                            cont[k] = dev.get(k, cont.get(k))
-                elif use_parent and nb.get("ip"):
-                    # neighbor not in the list: reach it with parent creds
-                    cont = {"hostname": nb.get("device", ""), "host": nb["ip"],
-                            "username": dev.get("username", ""),
-                            "password": dev.get("password", ""),
-                            "enable": dev.get("enable", ""),
-                            "port": dev.get("port", 22)}
-                if cont is not None:
-                    cont["mac"] = mac  # carry over for the next hop
-        except Exception as e:
-            lines.append(f"*** ERROR on {host}: {e} ***")
-        self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", cont)))
+                self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                if cont is None or not auto:
+                    self.msg_queue.put(("track_done", cont if not auto else None))
+                    break
+                cur = cont
+        if auto:
+            self.msg_queue.put(("track_done", None))
 
     # ---------- search tab ----------
     def _set_text(self, content: str):
@@ -1430,13 +1483,34 @@ class App(tk.Tk):
                     else:
                         self.status.set(self.T("status_done").format(hits=hits, devs=devs))
                 elif kind == "track_prog":
-                    self.prog_track.configure(value=payload)
+                    try:
+                        self.prog_track.configure(value=payload)
+                    except tk.TclError:
+                        pass
+                elif kind == "track_chunk":
+                    host, text = payload
+                    if not self.txt_track.get("1.0", tk.END).strip():
+                        self._set_track_text(text)
+                    else:
+                        self._append_track_text(text)
+                    if host:
+                        self.status.set(self.T("track_working").format(
+                            ip=self.ent_track_ip.get().strip(), host=host))
+                        try:
+                            if host in self.combo_track_dev.cget("values"):
+                                self.track_dev_var.set(host)
+                        except tk.TclError:
+                            pass
                 elif kind == "track_done":
-                    text, cont = payload
+                    cont = payload
                     self.tracking = False
                     self.btn_track.configure(state="normal")
-                    self.prog_track.configure(value=3)
-                    self._set_track_text(text)
+                    self.btn_track_stop.configure(state="disabled")
+                    try:
+                        self.prog_track.stop()
+                    except tk.TclError:
+                        pass
+                    self.prog_track.configure(mode="determinate", value=3)
                     self._track_cont = cont
                     if cont:
                         self.btn_track_cont.configure(
