@@ -47,8 +47,13 @@ Gotowy `.exe` nie wymaga Pythona ani instalacji.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build_exe.ps1
-# wynik: dist\CiscoACLHelper.exe
+# wynik: dist\CiscoACLHelper\CiscoACLHelper.exe
+#        + dist\CiscoACLHelper-windows.zip (do release)
 ```
+
+Celowo `--onedir` (folder), nie pojedynczy plik: onefile rozpakowuje
+~100 MB do tempa przy KAŻDYM starcie (wolno + skanowane przez antywirus),
+folder startuje w ~1 s. Do dystrybucji służy zip z release.
 
 ## Uruchomienie / pliki obok exe
 
