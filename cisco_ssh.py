@@ -219,55 +219,11 @@ def fetch_config(host: str, username: str, password: str,
 
     _enable_legacy_cisco_algos()  # ensure patch active (also for frozen exe)
 
-    # Attempt 1: full algorithm set. Attempt 2 (only if negotiation died):
-    # disable GCM ciphers to force aes256-ctr - the device lists aes256-gcm
-    # first and Paramiko<->Cisco GCM interop is a known trouble spot.
-    attempts: list[dict | None] = [
-        None,
-        {"ciphers": list(_GCM_CIPHERS)},
-    ]
-    client: paramiko.Transport | None = None
-    last_err: BaseException | None = None
-    for disabled in attempts:
-        try:
-            client = _connect_once(host, username, password, port, timeout, disabled)
-            break
-        except AuthenticationException as e:
-            # Pure credential rejection - retrying with other ciphers won't help.
-            last_err = e
-            break
-        except OSError as e:
-            # TCP-level failure - not a cipher problem, don't retry.
-            last_err = e
-            break
-        except Exception as e:
-            last_err = e
-            if disabled is None and _looks_like_negotiation_failure(e):
-                continue  # try again without GCM
-            break
-    if client is None:
-        raise _friendly_error(host, last_err or RuntimeError("SSH connect failed"),
-                              debug_log)
+    client = _connect_with_retry(host, username, password, port, timeout,
+                                 debug_log)
 
     try:
-        chan = client.open_session()
-        chan.get_pty(term="vt100", width=500, height=100)
-        chan.invoke_shell()
-        _shell_read(chan, 1.0)
-
-        if enable:
-            chan.send("enable\n")
-            time.sleep(0.8)
-            prompt = ""
-            while chan.recv_ready():
-                prompt += chan.recv(65535).decode("utf-8", errors="replace")
-            if re.search(r"[Pp]assword", prompt):
-                chan.send(enable + "\n")
-                time.sleep(1.0)
-                _shell_read(chan, 0.5)
-
-        _shell_exec(chan, "terminal length 0", 1.0)
-        _shell_exec(chan, "terminal width 512", 1.0)  # avoid wrapped lines
+        chan = _open_shell(client, enable)
 
         best = ""
         for cmd in ACL_COMMANDS:
@@ -287,5 +243,92 @@ def fetch_config(host: str, username: str, password: str,
         if not best.strip():
             raise RuntimeError("Empty response - check privileges / enable password.")
         return best
+    finally:
+        client.close()
+
+
+def _connect_with_retry(host: str, username: str, password: str, port: int,
+                        timeout: int, debug_log: str | None) -> paramiko.Transport:
+    """Connect with GCM->CTR fallback. Raises friendly RuntimeError on failure."""
+    # Attempt 1: full algorithm set. Attempt 2 (only if negotiation died):
+    # disable GCM ciphers to force aes256-ctr - some devices list aes256-gcm
+    # first and Paramiko<->Cisco GCM interop is a known trouble spot.
+    attempts: list[dict | None] = [
+        None,
+        {"ciphers": list(_GCM_CIPHERS)},
+    ]
+    last_err: BaseException | None = None
+    for disabled in attempts:
+        try:
+            return _connect_once(host, username, password, port, timeout, disabled)
+        except AuthenticationException as e:
+            # Pure credential rejection - retrying with other ciphers won't help.
+            raise _friendly_error(host, e, debug_log) from e
+        except OSError as e:
+            # TCP-level failure - not a cipher problem, don't retry.
+            raise _friendly_error(host, e, debug_log) from e
+        except Exception as e:
+            last_err = e
+            if disabled is None and _looks_like_negotiation_failure(e):
+                continue  # try again without GCM
+            break
+    raise _friendly_error(host, last_err or RuntimeError("SSH connect failed"),
+                          debug_log)
+
+
+def _open_shell(t: paramiko.Transport, enable: str | None = None):
+    """Open shell channel, handle enable, disable paging/wrapping."""
+    chan = t.open_session()
+    chan.get_pty(term="vt100", width=500, height=100)
+    chan.invoke_shell()
+    _shell_read(chan, 1.0)
+    if enable:
+        chan.send("enable\n")
+        time.sleep(0.8)
+        prompt = ""
+        while chan.recv_ready():
+            prompt += chan.recv(65535).decode("utf-8", errors="replace")
+        if re.search(r"[Pp]assword", prompt):
+            chan.send(enable + "\n")
+            time.sleep(1.0)
+            _shell_read(chan, 0.5)
+    _shell_exec(chan, "terminal length 0", 1.0)
+    _shell_exec(chan, "terminal width 512", 1.0)  # avoid wrapped lines
+    return chan
+
+
+def _clean_output(out: str, cmd: str) -> str:
+    """Strip echoed command (first line) and trailing prompt line."""
+    lines = out.splitlines()
+    if lines and cmd.split("|")[0].strip()[:10] in lines[0]:
+        lines = lines[1:]
+    if lines and re.search(r"[#>]\s*$", lines[-1]):
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def run_commands(host: str, username: str, password: str,
+                 enable: str | None = None, port: int = 22,
+                 timeout: int = 15, commands: tuple | list = (),
+                 debug_log: str | None = None) -> dict:
+    """Run arbitrary show commands over one SSHv2 shell session.
+
+    Returns {command: cleaned output}. Raises friendly RuntimeError on failure.
+    """
+    if debug_log:
+        try:
+            paramiko.util.log_to_file(debug_log, level="DEBUG")
+        except Exception:
+            pass
+
+    _enable_legacy_cisco_algos()
+    client = _connect_with_retry(host, username, password, port, timeout, debug_log)
+    try:
+        chan = _open_shell(client, enable)
+        res = {}
+        for cmd in commands:
+            res[cmd] = _clean_output(_shell_exec(chan, cmd, 2.5), cmd)
+        chan.close()
+        return res
     finally:
         client.close()

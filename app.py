@@ -17,6 +17,7 @@ import acl_parser
 import cisco_ssh
 import crypto_store
 import dhcp_check
+import track
 from i18n import STRINGS, VALID_LANGS
 
 
@@ -270,6 +271,8 @@ class App(tk.Tk):
         self.subnets: list[dict] = []  # {"subnet": ..., "acl_in": ..., "acl_out": ...}
         self.gen_script: str = ""
         self.generating = False
+        self.tracking = False
+        self._track_cont_host: str | None = None
         self._gen_start_vars: dict[str, tk.StringVar] = {}
         self._gen_auto: dict[str, int] = {}
         self._gen_taken: dict[str, set[int]] = {}
@@ -480,6 +483,47 @@ class App(tk.Tk):
         gen_fr.grid_rowconfigure(0, weight=1)
         gen_fr.grid_columnconfigure(0, weight=1)
 
+        # --- Tab: IP tracking (ARP -> MAC -> port -> CDP) ---
+        self.tab_track = ttk.Frame(self.nb)
+        self.nb.add(self.tab_track, text="track")
+        tf = ttk.Frame(self.tab_track)
+        tf.pack(fill="x", padx=10, pady=10)
+        self.lbl_track_ip = ttk.Label(tf, text="")
+        self.lbl_track_ip.grid(row=0, column=0, sticky="w")
+        self.ent_track_ip = ttk.Entry(tf, width=24, font=("Consolas", 11))
+        self.ent_track_ip.grid(row=1, column=0, sticky="w", pady=4)
+        self.lbl_track_dev = ttk.Label(tf, text="")
+        self.lbl_track_dev.grid(row=0, column=1, sticky="w", padx=(16, 0))
+        self.track_dev_var = tk.StringVar(value="")
+        self.combo_track_dev = ttk.Combobox(tf, textvariable=self.track_dev_var,
+                                            state="readonly", width=24, values=[])
+        self.combo_track_dev.grid(row=1, column=1, sticky="w", padx=(16, 0), pady=4)
+
+        tbtns = ttk.Frame(self.tab_track)
+        tbtns.pack(fill="x", padx=10, pady=(0, 8))
+        self.btn_track = ttk.Button(tbtns, text="", command=self.trace_ip)
+        self.btn_track.pack(side="left", padx=(0, 6))
+        self.btn_track_clear = ttk.Button(tbtns, text="", command=self.clear_track)
+        self.btn_track_clear.pack(side="left", padx=6)
+        self.btn_track_cont = ttk.Button(tbtns, text="", command=self.continue_track)
+        self.prog_track = ttk.Progressbar(tbtns, mode="determinate", length=150)
+        self.prog_track.pack(side="left", padx=(14, 0))
+
+        self.lbl_track_results = ttk.Label(self.tab_track, text="")
+        self.lbl_track_results.pack(anchor="w", padx=10, pady=(2, 2))
+        track_fr = ttk.Frame(self.tab_track)
+        track_fr.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        self.txt_track = tk.Text(track_fr, wrap="none", font=("Consolas", 10),
+                                 state="disabled")
+        trk_ys = ttk.Scrollbar(track_fr, orient="vertical", command=self.txt_track.yview)
+        trk_xs = ttk.Scrollbar(track_fr, orient="horizontal", command=self.txt_track.xview)
+        self.txt_track.configure(yscrollcommand=trk_ys.set, xscrollcommand=trk_xs.set)
+        self.txt_track.grid(row=0, column=0, sticky="nsew")
+        trk_ys.grid(row=0, column=1, sticky="ns")
+        trk_xs.grid(row=1, column=0, sticky="ew")
+        track_fr.grid_rowconfigure(0, weight=1)
+        track_fr.grid_columnconfigure(0, weight=1)
+
         # --- Tab 5: settings ---
         self.tab_set = ttk.Frame(self.nb)
         self.nb.add(self.tab_set, text="settings")
@@ -509,11 +553,11 @@ class App(tk.Tk):
             command=lambda: save_ssh_debug(self.ssh_debug_var.get()))
         self.chk_ssh_debug.pack(anchor="w", padx=14, pady=(14, 0))
 
-        # tab order: search, generator, devices, subnets, settings
-        for _tab in (self.tab_search, self.tab_gen, self.tab_dev,
+        # tab order: search, generator, tracking, devices, subnets, settings
+        for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_dev,
                      self.tab_sub, self.tab_set):
             self.nb.forget(_tab)
-        for _tab in (self.tab_search, self.tab_gen, self.tab_dev,
+        for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_dev,
                      self.tab_sub, self.tab_set):
             self.nb.add(_tab, text="")
 
@@ -522,6 +566,7 @@ class App(tk.Tk):
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w").pack(
             fill="x", side="bottom", padx=2, pady=2)
         self.ent_ip.bind("<Return>", lambda _e: self.start_search())
+        self.ent_track_ip.bind("<Return>", lambda _e: self.trace_ip())
         self.ent_gen_pc.bind("<FocusOut>", lambda _e: self._dhcp_check_async())
         self.ent_gen_pc.bind("<Return>", lambda _e: self.generate_acl())
 
@@ -529,6 +574,8 @@ class App(tk.Tk):
         S = STRINGS[self.lang]
         self.title(S["app_title"])
         self.nb.tab(self.tab_search, text=S["tab_search"])
+        self.nb.tab(self.tab_gen, text=S["tab_gen"])
+        self.nb.tab(self.tab_track, text=S["tab_track"])
         self.nb.tab(self.tab_dev, text=S["tab_devices"])
         self.nb.tab(self.tab_sub, text=S["tab_subnets"])
         self.nb.tab(self.tab_gen, text=S["tab_gen"])
@@ -571,6 +618,11 @@ class App(tk.Tk):
         self.btn_gen_copy.configure(text=S["copy_btn"])
         self.btn_gen_clear.configure(text=S["clear_btn"])
         self.lbl_gen_results.configure(text=S["results_label"])
+        self.lbl_track_ip.configure(text=S["track_ip_label"])
+        self.lbl_track_dev.configure(text=S["track_dev_label"])
+        self.btn_track.configure(text=S["track_btn"])
+        self.btn_track_clear.configure(text=S["clear_btn"])
+        self.lbl_track_results.configure(text=S["results_label"])
         self.lbl_lang.configure(text=S["lang_label"])
         self.lbl_master.configure(text=S["master_label"])
         self.btn_chmaster.configure(text=S["change_master_btn"])
@@ -1027,6 +1079,112 @@ class App(tk.Tk):
         self.combo_gen_dev.configure(values=hosts)
         if self.gen_dev_var.get() not in hosts:
             self.gen_dev_var.set(hosts[0] if hosts else "")
+        self.combo_track_dev.configure(values=hosts)
+        if self.track_dev_var.get() not in hosts:
+            self.track_dev_var.set(hosts[0] if hosts else "")
+
+    # ---------- IP tracking tab (ARP -> MAC -> port -> CDP) ----------
+    def _set_track_text(self, content: str):
+        self.txt_track.configure(state="normal")
+        self.txt_track.delete("1.0", tk.END)
+        self.txt_track.insert("1.0", content)
+        self.txt_track.configure(state="disabled")
+
+    def clear_track(self):
+        self._track_cont_host = None
+        self.btn_track_cont.pack_forget()
+        self.prog_track.configure(value=0)
+        self._set_track_text("")
+
+    def _lookup_device(self, host: str) -> dict | None:
+        if not host:
+            return None
+        return next((dict(d) for d in self.devices if d.get("host") == host), None)
+
+    def trace_ip(self):
+        if self.tracking:
+            return
+        if not self._require_unlocked():
+            return
+        ip = self.ent_track_ip.get().strip()
+        if not self._valid_ip(ip):
+            messagebox.showwarning("ACL", self.T("status_bad_ip"))
+            return
+        if not self.devices:
+            messagebox.showwarning("ACL", self.T("status_no_devices"))
+            return
+        dev = self._lookup_device(self.track_dev_var.get().strip())
+        if dev is None:
+            messagebox.showwarning("ACL", self.T("track_need_dev"))
+            return
+        self._track_cont_host = None
+        self.btn_track_cont.pack_forget()
+        self._set_track_text("")
+        self.tracking = True
+        self.btn_track.configure(state="disabled")
+        self.prog_track.configure(maximum=3, value=0)
+        self.status.set(self.T("track_working").format(ip=ip, host=dev["host"]))
+        threading.Thread(target=self._track_worker,
+                         args=(ip, dev, self._ssh_debug_log()), daemon=True).start()
+
+    def continue_track(self):
+        if self._track_cont_host and not self.tracking:
+            self.track_dev_var.set(self._track_cont_host)
+            self.trace_ip()
+
+    def _track_run(self, dev: dict, cmd: str, debug_log) -> str:
+        out = cisco_ssh.run_commands(
+            dev["host"], dev["username"], dev.get("password", ""),
+            dev.get("enable") or None, int(dev.get("port", 22)),
+            timeout=15, commands=[cmd], debug_log=debug_log)
+        return out.get(cmd, "")
+
+    def _track_worker(self, ip: str, dev: dict, debug_log):
+        host = dev["host"]
+        lines = [f"=== {host} : {ip} ==="]
+        cont: str | None = None
+        try:
+            arp_out = self._track_run(dev, f"show ip arp {ip}", debug_log)
+            self.msg_queue.put(("track_prog", 1))
+            arp = track.parse_arp(arp_out, ip)
+            if not arp:
+                lines.append(self.T("track_arp_none").format(ip=ip, host=host))
+                self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", None)))
+                return
+            if arp.get("incomplete"):
+                lines.append(self.T("track_arp_incomplete").format(ip=ip))
+                self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", None)))
+                return
+            mac = arp["mac"]
+            lines.append(f"ARP: {ip} -> {mac} ({arp.get('interface', '')})".rstrip())
+
+            mac_out = self._track_run(dev, f"show mac address-table address {mac}",
+                                      debug_log)
+            self.msg_queue.put(("track_prog", 2))
+            entries = track.parse_mac_table(mac_out, mac)
+            if not entries:
+                lines.append(self.T("track_mac_none").format(mac=mac, host=host))
+                self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", None)))
+                return
+            port = entries[0]["port"]
+            for e in entries:
+                vlan = f"VLAN {e['vlan']}, " if e.get("vlan") else ""
+                lines.append(f"MAC: {mac} -> {e['port']} ({vlan}{e.get('type', '')})".rstrip())
+
+            cdp_out = self._track_run(dev, "show cdp neighbors detail", debug_log)
+            self.msg_queue.put(("track_prog", 3))
+            nb = track.find_cdp_on_port(track.parse_cdp_detail(cdp_out), port)
+            if not nb:
+                lines.append(self.T("track_cdp_none").format(port=port, host=host))
+            else:
+                plat = f" [{nb['platform']}]" if nb.get("platform") else ""
+                lines.append(f"CDP: {port} -> {nb['device']} ({nb.get('ip', '?')})"
+                             f" | remote {nb.get('remote', '?')}{plat}")
+                if nb.get("ip") and self._lookup_device(nb["ip"]):
+                    cont = nb["ip"]
+        except Exception as e:
+            lines.append(f"*** ERROR on {host}: {e} ***")
+        self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", cont)))
 
     # ---------- search tab ----------
     def _set_text(self, content: str):
@@ -1210,6 +1368,22 @@ class App(tk.Tk):
                         self.status.set(self.T("status_ready"))
                     else:
                         self.status.set(self.T("status_done").format(hits=hits, devs=devs))
+                elif kind == "track_prog":
+                    self.prog_track.configure(value=payload)
+                elif kind == "track_done":
+                    text, cont = payload
+                    self.tracking = False
+                    self.btn_track.configure(state="normal")
+                    self.prog_track.configure(value=3)
+                    self._set_track_text(text)
+                    self._track_cont_host = cont
+                    if cont:
+                        self.btn_track_cont.configure(
+                            text=self.T("track_continue").format(host=cont))
+                        self.btn_track_cont.pack(side="left", padx=6)
+                    else:
+                        self.btn_track_cont.pack_forget()
+                    self.status.set(self.T("status_ready"))
                 elif kind == "info":
                     self.status.set(self.T("status_ready"))
                     messagebox.showinfo("ACL", payload)
