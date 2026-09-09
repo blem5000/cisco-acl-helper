@@ -140,6 +140,20 @@ def find_cdp_on_port(entries: list[dict], port: str) -> dict | None:
     return None
 
 
+def resolve_mac(arp_result: dict | None, preset_mac: str = "") -> tuple:
+    """Pick the MAC for the MAC-table step.
+
+    Fresh ARP wins; when the device has no ARP entry (typical L2-only
+    switch on a continued hop), fall back to the MAC carried over from
+    the parent device. Returns (mac|None, "fresh"|"parent"|"none").
+    """
+    if arp_result and not arp_result.get("incomplete") and arp_result.get("mac"):
+        return str(arp_result["mac"]).lower(), "fresh"
+    if preset_mac and canon_mac(preset_mac) and len(canon_mac(preset_mac)) == 12:
+        return preset_mac.lower(), "parent"
+    return None, "none"
+
+
 def short_name(name: str) -> str:
     """SWITCH2.domain.local -> switch2 (for CDP Device ID matching)."""
     return (name or "").strip().split(".")[0].strip().lower()

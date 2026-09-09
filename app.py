@@ -1192,16 +1192,18 @@ class App(tk.Tk):
             arp_out = self._track_run(dev, f"show ip arp {ip}", debug_log)
             self.msg_queue.put(("track_prog", 1))
             arp = track.parse_arp(arp_out, ip)
-            if not arp:
-                lines.append(self.T("track_arp_none").format(ip=ip, host=host))
+            mac, origin = track.resolve_mac(arp, dev.get("mac", ""))
+            if mac is None:
+                if arp and arp.get("incomplete"):
+                    lines.append(self.T("track_arp_incomplete").format(ip=ip))
+                else:
+                    lines.append(self.T("track_arp_none").format(ip=ip, host=host))
                 self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", None)))
                 return
-            if arp.get("incomplete"):
-                lines.append(self.T("track_arp_incomplete").format(ip=ip))
-                self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", None)))
-                return
-            mac = arp["mac"]
-            lines.append(f"ARP: {ip} -> {mac} ({arp.get('interface', '')})".rstrip())
+            if origin == "fresh":
+                lines.append(f"ARP: {ip} -> {mac} ({arp.get('interface', '')})".rstrip())
+            else:
+                lines.append(self.T("track_mac_parent").format(host=host, mac=mac))
 
             mac_out = self._track_run(dev, f"show mac address-table address {mac}",
                                       debug_log)
@@ -1239,6 +1241,8 @@ class App(tk.Tk):
                             "password": dev.get("password", ""),
                             "enable": dev.get("enable", ""),
                             "port": dev.get("port", 22)}
+                if cont is not None:
+                    cont["mac"] = mac  # carry over for the next hop
         except Exception as e:
             lines.append(f"*** ERROR on {host}: {e} ***")
         self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", cont)))
