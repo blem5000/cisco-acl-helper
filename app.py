@@ -180,6 +180,7 @@ class DeviceDialog(tk.Toplevel):
         ttk.Button(fr, text=S["ok_btn"], command=self._on_ok).pack(side="left", padx=6)
         ttk.Button(fr, text=S["cancel_btn"], command=self.destroy).pack(side="left", padx=6)
         self.transient(parent)
+        self.e_host.focus_set()
 
     @staticmethod
     def _toggle(entry: ttk.Entry):
@@ -379,6 +380,8 @@ class App(tk.Tk):
         self.btn_add.pack(side="left", padx=(0, 6))
         self.btn_edit = ttk.Button(dbtns, text="", command=self.edit_device)
         self.btn_edit.pack(side="left", padx=6)
+        self.btn_dup = ttk.Button(dbtns, text="", command=self.dup_device)
+        self.btn_dup.pack(side="left", padx=6)
         self.btn_del = ttk.Button(dbtns, text="", command=self.del_device)
         self.btn_del.pack(side="left", padx=6)
         self.btn_test = ttk.Button(dbtns, text="", command=self.test_device)
@@ -595,6 +598,7 @@ class App(tk.Tk):
         self.tree.heading("port", text=S["col_port"])
         self.btn_add.configure(text=S["add_btn"])
         self.btn_edit.configure(text=S["edit_btn"])
+        self.btn_dup.configure(text=S["dup_btn"])
         self.btn_del.configure(text=S["del_btn"])
         self.btn_test.configure(text=S["test_btn"])
         self.lbl_sub.configure(text=S["subnets_label"])
@@ -762,6 +766,22 @@ class App(tk.Tk):
         host = self.devices[idx].get("host", "")
         if messagebox.askyesno("ACL", self.T("confirm_del").format(host=host)):
             del self.devices[idx]
+            self.persist_store()
+            self.refresh_tree()
+
+    def dup_device(self):
+        """Duplicate credentials: same login data, empty host to fill in."""
+        if not self._require_unlocked():
+            return
+        idx = self._selected_device_idx()
+        if idx is None:
+            return
+        src = dict(self.devices[idx])
+        src["host"] = ""
+        dlg = DeviceDialog(self, self.lang, self.T("dlg_dup_title"), src)
+        self.wait_window(dlg)
+        if dlg.result:
+            self.devices.append(dlg.result)
             self.persist_store()
             self.refresh_tree()
 

@@ -11,6 +11,8 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   gotową do wklejenia w CLI ( z jednego wybranego urządzenia, z końcowym Enterem).
 - **Urządzenia** — lista routerów (IP, port, login, hasło, enable), przechowywana
   **szyfrowana** (Fernet, klucz z hasła głównego przez PBKDF2-SHA256).
+  Przycisk **Duplikuj** kopiuje poświadczenia z wybranego urządzenia
+  (do wypełnienia zostaje tylko nowe IP).
 - **Podsieci** — mapowanie `podsieć (CIDR) → ACL-IN / ACL-OUT` (osobne listy
   dla kierunków in/out).
 - **Generator ACL** — dla jednego komputera i wielu kamer generuje gotowy
