@@ -9,10 +9,10 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   i pokazuje wpisy ACL zawierające to IP. Tryb negacji dodaje `no` + nagłówek
   `ip access-list extended`, a przycisk Kopiuj przenosi do schowka tylko treść
   gotową do wklejenia w CLI ( z jednego wybranego urządzenia, z końcowym Enterem).
-- **Urządzenia** — lista routerów (IP, port, login, hasło, enable), przechowywana
-  **szyfrowana** (Fernet, klucz z hasła głównego przez PBKDF2-SHA256).
+- **Urządzenia** — lista routerów (nazwa hosta, IP, port, login, hasło, enable),
+  przechowywana **szyfrowana** (Fernet, klucz z hasła głównego przez PBKDF2-SHA256).
   Przycisk **Duplikuj** kopiuje poświadczenia z wybranego urządzenia
-  (do wypełnienia zostaje tylko nowe IP).
+  (do wypełnienia zostaje tylko nowe IP i nazwa).
 - **Podsieci** — mapowanie `podsieć (CIDR) → ACL-IN / ACL-OUT` (osobne listy
   dla kierunków in/out).
 - **Generator ACL** — dla jednego komputera i wielu kamer generuje gotowy
@@ -21,6 +21,11 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   `end` → `wr`. Sąsiadujące IP agreguje do CIDR (`host` vs `sieć wildcard`),
   numery sekwencji pobiera z urządzenia przez SSH (wolne, z pomijaniem zajętych,
   edytowalne przed kopiowaniem). Sprawdza też rezerwację DHCP komputera.
+- **Szukanie adresu** — namierzanie IP: `show ip arp` → MAC →
+  `show mac address-table` → port → sąsiad `show cdp neighbors detail`.
+  Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada
+  po IP lub nazwie hosta, opcjonalnie logowanie poświadczeniami urządzenia
+  nadrzędnego).
 - **Ustawienia** — język, adres serwera DHCP, zmiana hasła głównego,
   opcjonalny log debugowania SSH (`ssh_debug.log`).
 

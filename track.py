@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 
 _MAC_DOTTED = re.compile(r"[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}")
@@ -136,4 +137,37 @@ def find_cdp_on_port(entries: list[dict], port: str) -> dict | None:
     for e in entries:
         if e.get("local") and normalize_port(e["local"]) == want:
             return e
+    return None
+
+
+def short_name(name: str) -> str:
+    """SWITCH2.domain.local -> switch2 (for CDP Device ID matching)."""
+    return (name or "").strip().split(".")[0].strip().lower()
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip())
+        return True
+    except ValueError:
+        return False
+
+
+def match_known_device(devices: list[dict], nb: dict) -> dict | None:
+    """Match a CDP neighbor to a device from the list (by IP or hostname).
+
+    IP match is exact; hostname match is case-insensitive on the short name
+    (without domain). Never matches on truncated-IP artefacts.
+    """
+    nb_ip = (nb.get("ip") or "").strip()
+    nb_name = short_name(nb.get("device", ""))
+    for d in devices or []:
+        host = str(d.get("host", "")).strip()
+        hn = short_name(str(d.get("hostname", "")))
+        if nb_ip and host and nb_ip == host:
+            return d
+        if nb_name and hn and nb_name == hn:
+            return d
+        if nb_name and host and not _is_ip(host) and nb_name == short_name(host):
+            return d
     return None

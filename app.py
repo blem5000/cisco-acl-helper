@@ -141,42 +141,49 @@ class DeviceDialog(tk.Toplevel):
         self.title(title)
         self.resizable(False, False)
         self.result: dict | None = None
-        init = initial or {"host": "", "port": 22, "username": "", "password": "", "enable": ""}
+        init = initial or {"hostname": "", "host": "", "port": 22, "username": "",
+                         "password": "", "enable": ""}
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-        ttk.Label(self, text=S["fld_host"]).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 2))
+        ttk.Label(self, text=S["fld_hostname"]).grid(row=0, column=0, sticky="w",
+                                                     padx=12, pady=(12, 2))
+        self.e_hostname = ttk.Entry(self, width=32)
+        self.e_hostname.grid(row=1, column=0, columnspan=2, padx=12)
+        self.e_hostname.insert(0, init.get("hostname", ""))
+
+        ttk.Label(self, text=S["fld_host"]).grid(row=2, column=0, sticky="w", padx=12, pady=(8, 2))
         self.e_host = ttk.Entry(self, width=32)
-        self.e_host.grid(row=1, column=0, columnspan=2, padx=12)
+        self.e_host.grid(row=3, column=0, columnspan=2, padx=12)
         self.e_host.insert(0, init.get("host", ""))
 
-        ttk.Label(self, text=S["fld_port"]).grid(row=2, column=0, sticky="w", padx=12, pady=(8, 2))
+        ttk.Label(self, text=S["fld_port"]).grid(row=4, column=0, sticky="w", padx=12, pady=(8, 2))
         self.e_port = ttk.Entry(self, width=10)
-        self.e_port.grid(row=3, column=0, sticky="w", padx=12)
+        self.e_port.grid(row=5, column=0, sticky="w", padx=12)
         self.e_port.insert(0, str(init.get("port", 22)))
 
-        ttk.Label(self, text=S["fld_user"]).grid(row=4, column=0, sticky="w", padx=12, pady=(8, 2))
+        ttk.Label(self, text=S["fld_user"]).grid(row=6, column=0, sticky="w", padx=12, pady=(8, 2))
         self.e_user = ttk.Entry(self, width=32)
-        self.e_user.grid(row=5, column=0, columnspan=2, padx=12)
+        self.e_user.grid(row=7, column=0, columnspan=2, padx=12)
         self.e_user.insert(0, init.get("username", ""))
 
-        ttk.Label(self, text=S["fld_pass"]).grid(row=6, column=0, sticky="w", padx=12, pady=(8, 2))
+        ttk.Label(self, text=S["fld_pass"]).grid(row=8, column=0, sticky="w", padx=12, pady=(8, 2))
         self.e_pass = ttk.Entry(self, show="*", width=26)
-        self.e_pass.grid(row=7, column=0, sticky="w", padx=12)
+        self.e_pass.grid(row=9, column=0, sticky="w", padx=12)
         self.e_pass.insert(0, init.get("password", ""))
         self.btn_show1 = ttk.Button(self, text=S["show_pass"], width=8,
                                     command=lambda: self._toggle(self.e_pass))
-        self.btn_show1.grid(row=7, column=1, padx=(0, 12))
+        self.btn_show1.grid(row=9, column=1, padx=(0, 12))
 
-        ttk.Label(self, text=S["fld_enable"]).grid(row=8, column=0, sticky="w", padx=12, pady=(8, 2))
+        ttk.Label(self, text=S["fld_enable"]).grid(row=10, column=0, sticky="w", padx=12, pady=(8, 2))
         self.e_enable = ttk.Entry(self, show="*", width=26)
-        self.e_enable.grid(row=9, column=0, sticky="w", padx=12)
+        self.e_enable.grid(row=11, column=0, sticky="w", padx=12)
         self.e_enable.insert(0, init.get("enable", ""))
         ttk.Button(self, text=S["show_pass"], width=8,
-                   command=lambda: self._toggle(self.e_enable)).grid(row=9, column=1, padx=(0, 12))
+                   command=lambda: self._toggle(self.e_enable)).grid(row=11, column=1, padx=(0, 12))
 
         fr = ttk.Frame(self)
-        fr.grid(row=10, column=0, columnspan=2, pady=14)
+        fr.grid(row=12, column=0, columnspan=2, pady=14)
         ttk.Button(fr, text=S["ok_btn"], command=self._on_ok).pack(side="left", padx=6)
         ttk.Button(fr, text=S["cancel_btn"], command=self.destroy).pack(side="left", padx=6)
         self.transient(parent)
@@ -197,6 +204,7 @@ class DeviceDialog(tk.Toplevel):
             messagebox.showwarning("ACL", "Bad port.")
             return
         self.result = {
+            "hostname": self.e_hostname.get().strip(),
             "host": host,
             "port": port,
             "username": self.e_user.get().strip(),
@@ -273,7 +281,7 @@ class App(tk.Tk):
         self.gen_script: str = ""
         self.generating = False
         self.tracking = False
-        self._track_cont_host: str | None = None
+        self._track_cont: dict | None = None  # effective creds for Continue
         self._gen_start_vars: dict[str, tk.StringVar] = {}
         self._gen_auto: dict[str, int] = {}
         self._gen_taken: dict[str, set[int]] = {}
@@ -370,7 +378,7 @@ class App(tk.Tk):
         self.nb.add(self.tab_dev, text="devices")
         self.lbl_dev = ttk.Label(self.tab_dev, text="")
         self.lbl_dev.pack(anchor="w", padx=10, pady=(10, 4))
-        cols = ("host", "user", "port")
+        cols = ("hostname", "host", "user", "port")
         self.tree = ttk.Treeview(self.tab_dev, columns=cols, show="headings", height=14)
         self.tree.pack(fill="both", expand=True, padx=10)
         self.tree.bind("<Double-1>", lambda _e: self.edit_device())
@@ -511,6 +519,10 @@ class App(tk.Tk):
         self.btn_track_cont = ttk.Button(tbtns, text="", command=self.continue_track)
         self.prog_track = ttk.Progressbar(tbtns, mode="determinate", length=150)
         self.prog_track.pack(side="left", padx=(14, 0))
+        self.track_parent_var = tk.BooleanVar(value=False)
+        self.chk_track_parent = ttk.Checkbutton(tbtns, text="",
+                                                variable=self.track_parent_var)
+        self.chk_track_parent.pack(side="left", padx=(14, 0))
 
         self.lbl_track_results = ttk.Label(self.tab_track, text="")
         self.lbl_track_results.pack(anchor="w", padx=10, pady=(2, 2))
@@ -593,6 +605,7 @@ class App(tk.Tk):
         self.btn_clear.configure(text=S["clear_btn"])
         self.lbl_results.configure(text=S["results_label"])
         self.lbl_dev.configure(text=S["devices_label"])
+        self.tree.heading("hostname", text=S["col_hostname"])
         self.tree.heading("host", text=S["col_host"])
         self.tree.heading("user", text=S["col_user"])
         self.tree.heading("port", text=S["col_port"])
@@ -626,6 +639,7 @@ class App(tk.Tk):
         self.lbl_track_dev.configure(text=S["track_dev_label"])
         self.btn_track.configure(text=S["track_btn"])
         self.btn_track_clear.configure(text=S["clear_btn"])
+        self.chk_track_parent.configure(text=S["track_parent_creds"])
         self.lbl_track_results.configure(text=S["results_label"])
         self.lbl_lang.configure(text=S["lang_label"])
         self.lbl_master.configure(text=S["master_label"])
@@ -715,8 +729,8 @@ class App(tk.Tk):
         for i in self.tree.get_children():
             self.tree.delete(i)
         for d in self.devices:
-            self.tree.insert("", "end", values=(d.get("host", ""), d.get("username", ""),
-                                                d.get("port", 22)))
+            self.tree.insert("", "end", values=(d.get("hostname", ""), d.get("host", ""),
+                                                d.get("username", ""), d.get("port", 22)))
         self._refresh_gen_devices()
 
     def refresh_subnets(self):
@@ -770,7 +784,7 @@ class App(tk.Tk):
             self.refresh_tree()
 
     def dup_device(self):
-        """Duplicate credentials: same login data, empty host to fill in."""
+        """Duplicate credentials: same login data, empty host/hostname to fill in."""
         if not self._require_unlocked():
             return
         idx = self._selected_device_idx()
@@ -778,6 +792,7 @@ class App(tk.Tk):
             return
         src = dict(self.devices[idx])
         src["host"] = ""
+        src["hostname"] = ""
         dlg = DeviceDialog(self, self.lang, self.T("dlg_dup_title"), src)
         self.wait_window(dlg)
         if dlg.result:
@@ -1111,7 +1126,7 @@ class App(tk.Tk):
         self.txt_track.configure(state="disabled")
 
     def clear_track(self):
-        self._track_cont_host = None
+        self._track_cont = None
         self.btn_track_cont.pack_forget()
         self.prog_track.configure(value=0)
         self._set_track_text("")
@@ -1137,20 +1152,29 @@ class App(tk.Tk):
         if dev is None:
             messagebox.showwarning("ACL", self.T("track_need_dev"))
             return
-        self._track_cont_host = None
+        self._start_trace(ip, dev)
+
+    def _start_trace(self, ip: str, dev: dict):
+        """Begin a trace with an explicit device dict (combo or Continue)."""
+        self._track_cont = None
         self.btn_track_cont.pack_forget()
         self._set_track_text("")
         self.tracking = True
         self.btn_track.configure(state="disabled")
         self.prog_track.configure(maximum=3, value=0)
         self.status.set(self.T("track_working").format(ip=ip, host=dev["host"]))
+        snapshot = [dict(d) for d in self.devices]
         threading.Thread(target=self._track_worker,
-                         args=(ip, dev, self._ssh_debug_log()), daemon=True).start()
+                         args=(ip, dev, snapshot, self.track_parent_var.get(),
+                               self._ssh_debug_log()), daemon=True).start()
 
     def continue_track(self):
-        if self._track_cont_host and not self.tracking:
-            self.track_dev_var.set(self._track_cont_host)
-            self.trace_ip()
+        if self._track_cont and not self.tracking:
+            ip = self.ent_track_ip.get().strip()
+            if not self._valid_ip(ip):
+                messagebox.showwarning("ACL", self.T("status_bad_ip"))
+                return
+            self._start_trace(ip, dict(self._track_cont))
 
     def _track_run(self, dev: dict, cmd: str, debug_log) -> str:
         out = cisco_ssh.run_commands(
@@ -1159,10 +1183,11 @@ class App(tk.Tk):
             timeout=15, commands=[cmd], debug_log=debug_log)
         return out.get(cmd, "")
 
-    def _track_worker(self, ip: str, dev: dict, debug_log):
+    def _track_worker(self, ip: str, dev: dict, devices: list,
+                      use_parent: bool, debug_log):
         host = dev["host"]
         lines = [f"=== {host} : {ip} ==="]
-        cont: str | None = None
+        cont: dict | None = None
         try:
             arp_out = self._track_run(dev, f"show ip arp {ip}", debug_log)
             self.msg_queue.put(("track_prog", 1))
@@ -1200,8 +1225,20 @@ class App(tk.Tk):
                 plat = f" [{nb['platform']}]" if nb.get("platform") else ""
                 lines.append(f"CDP: {port} -> {nb['device']} ({nb.get('ip', '?')})"
                              f" | remote {nb.get('remote', '?')}{plat}")
-                if nb.get("ip") and self._lookup_device(nb["ip"]):
-                    cont = nb["ip"]
+                listed = track.match_known_device(devices, nb)
+                if listed is not None:
+                    cont = dict(listed)
+                    if use_parent:
+                        # log in with the parent (current) device credentials
+                        for k in ("username", "password", "enable", "port"):
+                            cont[k] = dev.get(k, cont.get(k))
+                elif use_parent and nb.get("ip"):
+                    # neighbor not in the list: reach it with parent creds
+                    cont = {"hostname": nb.get("device", ""), "host": nb["ip"],
+                            "username": dev.get("username", ""),
+                            "password": dev.get("password", ""),
+                            "enable": dev.get("enable", ""),
+                            "port": dev.get("port", 22)}
         except Exception as e:
             lines.append(f"*** ERROR on {host}: {e} ***")
         self.msg_queue.put(("track_done", ("\n".join(lines) + "\n", cont)))
@@ -1396,10 +1433,10 @@ class App(tk.Tk):
                     self.btn_track.configure(state="normal")
                     self.prog_track.configure(value=3)
                     self._set_track_text(text)
-                    self._track_cont_host = cont
+                    self._track_cont = cont
                     if cont:
                         self.btn_track_cont.configure(
-                            text=self.T("track_continue").format(host=cont))
+                            text=self.T("track_continue").format(host=cont["host"]))
                         self.btn_track_cont.pack(side="left", padx=6)
                     else:
                         self.btn_track_cont.pack_forget()
