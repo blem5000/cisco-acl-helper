@@ -18,7 +18,9 @@ import cisco_ssh
 import crypto_store
 import dhcp_check
 import track
+import updater
 from i18n import STRINGS, VALID_LANGS
+from version import __version__ as APP_VERSION
 
 
 def app_dir() -> str:
@@ -61,6 +63,27 @@ def load_ssh_debug() -> bool:
 def save_ssh_debug(enabled: bool) -> None:
     cfg = _read_config()
     cfg["ssh_debug"] = bool(enabled)
+    _write_config(cfg)
+
+
+def load_update_auto() -> bool:
+    v = _read_config().get("update_auto", True)
+    return bool(v) if isinstance(v, bool) else True
+
+
+def save_update_auto(enabled: bool) -> None:
+    cfg = _read_config()
+    cfg["update_auto"] = bool(enabled)
+    _write_config(cfg)
+
+
+def load_skipped_version() -> str:
+    return str(_read_config().get("update_skipped", "") or "")
+
+
+def save_skipped_version(tag: str) -> None:
+    cfg = _read_config()
+    cfg["update_skipped"] = tag
     _write_config(cfg)
 
 
@@ -292,6 +315,14 @@ class App(tk.Tk):
         self.searching = False
         self.stop_event = threading.Event()
         self.msg_queue: queue.Queue = queue.Queue()
+        # --- self-update state ---
+        self._checking_update = False
+        self._update_info: dict | None = None
+        self._update_dialog: tk.Toplevel | None = None
+        self._update_prog: ttk.Progressbar | None = None
+        self._update_prog_var: tk.StringVar | None = None
+        self._update_cancel = threading.Event()
+        self._update_zip_path: str | None = None
 
         self.title(STRINGS[self.lang]["app_title"])
         self.geometry("860x620")
@@ -301,6 +332,7 @@ class App(tk.Tk):
         self.apply_language()
         self.after(100, self._poll_queue)
         self.after(200, self._startup_unlock)
+        self.after(3000, self._auto_update_check)
 
     # ---------- helpers ----------
     def T(self, key: str) -> str:
@@ -571,6 +603,20 @@ class App(tk.Tk):
             self.tab_set, text="", variable=self.ssh_debug_var,
             command=lambda: save_ssh_debug(self.ssh_debug_var.get()))
         self.chk_ssh_debug.pack(anchor="w", padx=14, pady=(14, 0))
+        # --- self-update section ---
+        ttk.Separator(self.tab_set, orient="horizontal").pack(fill="x", padx=14, pady=(18, 8))
+        self.lbl_upd = ttk.Label(self.tab_set, text="")
+        self.lbl_upd.pack(anchor="w", padx=14)
+        self.lbl_upd_ver = ttk.Label(self.tab_set, text="", foreground="gray")
+        self.lbl_upd_ver.pack(anchor="w", padx=14, pady=(2, 6))
+        self.upd_auto_var = tk.BooleanVar(value=load_update_auto())
+        self.chk_upd_auto = ttk.Checkbutton(
+            self.tab_set, text="", variable=self.upd_auto_var,
+            command=lambda: save_update_auto(self.upd_auto_var.get()))
+        self.chk_upd_auto.pack(anchor="w", padx=14)
+        self.btn_upd_check = ttk.Button(
+            self.tab_set, text="", command=lambda: self.check_for_updates(manual=True))
+        self.btn_upd_check.pack(anchor="w", padx=14, pady=(8, 0))
 
         # tab order: search, generator, tracking, devices, subnets, settings
         for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_dev,
@@ -651,6 +697,10 @@ class App(tk.Tk):
         self.btn_chmaster.configure(text=S["change_master_btn"])
         self.lbl_dhcp.configure(text=S["dhcp_label"])
         self.chk_ssh_debug.configure(text=S["ssh_debug_label"])
+        self.lbl_upd.configure(text=S["upd_section"])
+        self.lbl_upd_ver.configure(text=S["upd_current"].format(ver=APP_VERSION))
+        self.chk_upd_auto.configure(text=S["upd_auto"])
+        self.btn_upd_check.configure(text=S["upd_check_btn"])
         self.ent_ip.delete(0, tk.END) if False else None
         # placeholder-ish: set status ready if empty
         if not self.status.get():
@@ -677,6 +727,152 @@ class App(tk.Tk):
     def _ssh_debug_log(self) -> str | None:
         """Paramiko debug log path when enabled in Settings, else None."""
         return SSH_DEBUG_LOG if self.ssh_debug_var.get() else None
+
+    # ---------- self-update (GitHub Releases) ----------
+    def _auto_update_check(self):
+        try:
+            if self.upd_auto_var.get() and not self._checking_update:
+                self.check_for_updates(manual=False)
+        except Exception:
+            pass
+
+    def check_for_updates(self, manual: bool = True):
+        if self._checking_update:
+            return
+        self._checking_update = True
+        if manual:
+            self.status.set(self.T("upd_downloading").format(tag="...", pct=""))
+        threading.Thread(target=self._update_worker,
+                         args=(manual,), daemon=True).start()
+
+    def _update_worker(self, manual: bool):
+        try:
+            info = updater.fetch_latest_release()
+        except Exception as e:
+            self.msg_queue.put(("update_error", (str(e), manual)))
+            return
+        try:
+            newer = updater.is_newer(info["tag"], APP_VERSION)
+        except Exception:
+            newer = False
+        if not newer:
+            self.msg_queue.put(("update_uptodate", manual))
+            return
+        if not manual and info["tag"] == load_skipped_version():
+            self.msg_queue.put(("update_silent_skip", None))
+            return
+        self.msg_queue.put(("update_available", (info, manual)))
+
+    def _show_update_dialog(self, info: dict):
+        # close previous dialog if any
+        try:
+            if self._update_dialog is not None and self._update_dialog.winfo_exists():
+                self._update_dialog.destroy()
+        except tk.TclError:
+            pass
+        self._update_info = info
+        self._update_zip_path = None
+        self._update_cancel.clear()
+        dlg = tk.Toplevel(self)
+        self._update_dialog = dlg
+        dlg.title(self.T("upd_available_title"))
+        dlg.resizable(True, True)
+        dlg.transient(self)
+        notes = (info.get("body") or "").strip()
+        if len(notes) > 2000:
+            notes = notes[:2000] + "..."
+        if not updater.is_frozen():
+            notes = self.T("upd_devmode") + ("\n\n" + notes if notes else "")
+        msg = self.T("upd_available_msg").format(
+            latest=info["tag"], cur=APP_VERSION, notes=notes or "-")
+        ttk.Label(dlg, text=msg, justify="left", wraplength=520).pack(
+            anchor="w", padx=14, pady=(14, 6))
+        self._update_prog_var = tk.StringVar(value="")
+        ttk.Label(dlg, textvariable=self._update_prog_var).pack(
+            anchor="w", padx=14)
+        self._update_prog = ttk.Progressbar(dlg, mode="determinate", length=480)
+        self._update_prog.pack(fill="x", padx=14, pady=(4, 10))
+        fr = ttk.Frame(dlg)
+        fr.pack(fill="x", padx=14, pady=(0, 14))
+        self._btn_upd_install = ttk.Button(
+            fr, text=self.T("upd_install_btn"),
+            command=self._start_update_download)
+        self._btn_upd_install.pack(side="left", padx=(0, 6))
+        ttk.Button(fr, text=self.T("upd_skip_btn"),
+                   command=lambda: self._skip_update_version(info["tag"])).pack(
+                       side="left", padx=6)
+        ttk.Button(fr, text=self.T("upd_later_btn"),
+                   command=dlg.destroy).pack(side="left", padx=6)
+        if not updater.is_frozen():
+            self._btn_upd_install.configure(state="disabled")
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        try:
+            dlg.geometry("+%d+%d" % (self.winfo_x() + 60, self.winfo_y() + 60))
+        except tk.TclError:
+            pass
+
+    def _skip_update_version(self, tag: str):
+        try:
+            save_skipped_version(tag)
+        except Exception:
+            pass
+        try:
+            if self._update_dialog is not None:
+                self._update_dialog.destroy()
+        except tk.TclError:
+            pass
+
+    def _start_update_download(self):
+        info = self._update_info
+        if not info:
+            return
+        try:
+            self._btn_upd_install.configure(state="disabled")
+        except (tk.TclError, AttributeError):
+            pass
+        self._update_cancel.clear()
+        threading.Thread(target=self._update_download_worker,
+                         args=(dict(info),), daemon=True).start()
+
+    def _update_download_worker(self, info: dict):
+        try:
+            dest = updater.temp_download_path(info["tag"])
+            def _cb(done: int, total: int):
+                self.msg_queue.put(("update_progress", (done, total, info["tag"])))
+            updater.download_asset(info["zip_url"], dest, progress_cb=_cb,
+                                   cancel_event=self._update_cancel)
+            self.msg_queue.put(("update_downloaded", (dest, info)))
+        except Exception as e:
+            self.msg_queue.put(("update_download_error", str(e)))
+
+    def _finish_update_download(self, zip_path: str, info: dict):
+        self._update_zip_path = zip_path
+        try:
+            if self._update_prog_var is not None:
+                self._update_prog_var.set(self.T("upd_download_done"))
+            if self._update_prog is not None:
+                self._update_prog.configure(value=100)
+        except tk.TclError:
+            pass
+        if not messagebox.askyesno(
+                self.T("upd_available_title"),
+                self.T("upd_install_confirm").format(tag=info["tag"]),
+                parent=self._update_dialog):
+            return
+        try:
+            bat = updater.write_apply_script(zip_path, updater.app_dir(), os.getpid())
+        except Exception as e:
+            messagebox.showerror("ACL", self.T("upd_error").format(err=e),
+                                 parent=self._update_dialog)
+            return
+        try:
+            updater.launch_apply_and_exit(bat)
+        except Exception as e:
+            messagebox.showerror("ACL", self.T("upd_error").format(err=e),
+                                 parent=self._update_dialog)
+            return
+        self.destroy()
+        os._exit(0)
 
     # ---------- master / store ----------
     def _startup_unlock(self):
@@ -1552,6 +1748,65 @@ class App(tk.Tk):
                         if dhcp_status == "none":
                             messagebox.showwarning(
                                 "ACL", self.T("dhcp_none").format(ip=pc))
+                elif kind == "update_error":
+                    self._checking_update = False
+                    err, manual = payload
+                    self.status.set(self.T("status_ready"))
+                    if manual:
+                        messagebox.showerror(
+                            "ACL", self.T("upd_error").format(err=err))
+                elif kind == "update_uptodate":
+                    self._checking_update = False
+                    manual = payload
+                    self.status.set(self.T("status_ready"))
+                    if manual:
+                        messagebox.showinfo(
+                            "ACL", self.T("upd_up_to_date").format(ver=APP_VERSION))
+                elif kind == "update_silent_skip":
+                    self._checking_update = False
+                    self.status.set(self.T("status_ready"))
+                elif kind == "update_available":
+                    self._checking_update = False
+                    self.status.set(self.T("status_ready"))
+                    info, _manual = payload
+                    self._show_update_dialog(info)
+                elif kind == "update_progress":
+                    done, total, tag = payload
+                    try:
+                        if self._update_prog is not None:
+                            if total:
+                                self._update_prog.configure(
+                                    maximum=total, value=done)
+                            else:
+                                self._update_prog.configure(
+                                    mode="indeterminate")
+                                self._update_prog.start(10)
+                        if self._update_prog_var is not None:
+                            pct = f"{done * 100 // total}%" if total else f"{done // 1024} KB"
+                            self._update_prog_var.set(
+                                self.T("upd_downloading").format(tag=tag, pct=pct))
+                    except tk.TclError:
+                        pass
+                elif kind == "update_downloaded":
+                    dest, info = payload
+                    try:
+                        if self._update_prog is not None:
+                            self._update_prog.stop()
+                            self._update_prog.configure(mode="determinate")
+                    except tk.TclError:
+                        pass
+                    self._finish_update_download(dest, info)
+                elif kind == "update_download_error":
+                    try:
+                        if self._btn_upd_install is not None:
+                            self._btn_upd_install.configure(state="normal")
+                        if self._update_prog_var is not None:
+                            self._update_prog_var.set("")
+                    except (tk.TclError, AttributeError):
+                        pass
+                    messagebox.showerror(
+                        "ACL", self.T("upd_error").format(err=payload),
+                        parent=self._update_dialog)
         except queue.Empty:
             pass
         self.after(200, self._poll_queue)
