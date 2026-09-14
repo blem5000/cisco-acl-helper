@@ -154,12 +154,51 @@ def temp_download_path(tag: str) -> str:
     return path
 
 
+def _own_start_unix() -> int:
+    """Unix timestamp (seconds) of current process start, Windows only.
+
+    Used to guard against PID reuse: the apply script proceeds immediately
+    if the process currently holding our PID started at a different time.
+    Returns 0 when unavailable (check is then skipped).
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.GetProcessTimes.restype = wintypes.BOOL
+        # PROCESS_QUERY_LIMITED_INFORMATION is enough and never fails for self
+        h = k32.OpenProcess(0x1000, False, k32.GetCurrentProcessId())
+        if not h:
+            return 0
+        try:
+            creation = wintypes.FILETIME()
+            dummy1 = wintypes.FILETIME()
+            dummy2 = wintypes.FILETIME()
+            dummy3 = wintypes.FILETIME()
+            if not k32.GetProcessTimes(h, ctypes.byref(creation),
+                                       ctypes.byref(dummy1),
+                                       ctypes.byref(dummy2),
+                                       ctypes.byref(dummy3)):
+                return 0
+        finally:
+            k32.CloseHandle(h)
+        ft = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        return int(ft // 10000000 - 11644473600)
+    except Exception:
+        return 0
+
+
 def write_apply_script(zip_path: str, target_dir: str, pid_to_wait: int) -> str:
     """Write update_apply_<pid>.bat next to temp; return its path.
 
-    The script waits for our PID to vanish, extracts the zip to a staging
-    dir, copies (robocopy) the inner folder over target_dir excluding user
-    files, restarts the exe, then cleans up temp files.
+    The script waits for our PID to vanish (single powershell Wait-Process,
+    no tasklist/find loop), extracts the zip to a staging dir, copies
+    (robocopy) the inner folder over target_dir excluding user files,
+    restarts the exe, then cleans up temp files. Progress goes to
+    %TEMP%\\acl_update_<pid>.log. Runs fully hidden (see
+    launch_apply_and_exit); a visible window appears only on failure.
     """
     exe_name = os.path.basename(exe_path())
     if not exe_name.lower().endswith(".exe"):
@@ -169,6 +208,17 @@ def write_apply_script(zip_path: str, target_dir: str, pid_to_wait: int) -> str:
     bat_path = os.path.join(tempfile.gettempdir(),
                             f"acl_apply_{pid_to_wait}.bat")
     xf = " ".join(PRESERVED_FILES)
+    pid_start = _own_start_unix()
+    # Wait snippet: if the PID holder started at a different second than us,
+    # the PID was reused after our exit -> do NOT wait (install immediately).
+    # $t = 0 means start time unknown -> plain wait (old behaviour, still hidden).
+    wait_ps = (
+        '"$t = %PIDSTART%; '
+        'try { $p = Get-Process -Id %PIDW% -ErrorAction Stop; '
+        'if ($t -ne 0) { $e = [datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc); '
+        '$s = [int][double]($p.StartTime.ToUniversalTime().Subtract($e).TotalSeconds); '
+        'if ($s -ne $t) { exit 0 } }; $p.WaitForExit() } catch { }"'
+    )
     # robocopy exit codes 0-7 mean success -> always exit 0 afterwards.
     bat = (
         "@echo off\r\n"
@@ -177,26 +227,28 @@ def write_apply_script(zip_path: str, target_dir: str, pid_to_wait: int) -> str:
         f'set "DST={target_dir}"\r\n'
         f'set "STAGE={staging}"\r\n'
         f'set "PIDW={pid_to_wait}"\r\n'
+        f'set "PIDSTART={pid_start}"\r\n'
         f'set "EXE={exe_name}"\r\n'
-        ":waitloop\r\n"
-        'tasklist /FI "PID eq %PIDW%" 2>nul | find "%PIDW%" >nul\r\n'
-        "if not errorlevel 1 (\r\n"
-        "  timeout /t 1 /nobreak >nul\r\n"
-        "  goto waitloop\r\n"
-        ")\r\n"
+        f'set "LOG=%TEMP%\\acl_update_{pid_to_wait}.log"\r\n'
+        'echo [%date% %time%] waiting for PID %PIDW% (start %PIDSTART%) > "%LOG%"\r\n'
+        'powershell -NoProfile -ExecutionPolicy Bypass -Command '
+        f'{wait_ps} >> "%LOG%" 2>&1\r\n'
+        'echo [%date% %time%] process gone, extracting >> "%LOG%"\r\n'
         'if exist "%STAGE%" rmdir /s /q "%STAGE%"\r\n'
         'mkdir "%STAGE%"\r\n'
         'powershell -NoProfile -ExecutionPolicy Bypass -Command '
-        '"Expand-Archive -LiteralPath \'"%ZIP%"\' -DestinationPath \'"%STAGE%"\' -Force"\r\n'
+        '"Expand-Archive -LiteralPath \'"%ZIP%"\' -DestinationPath \'"%STAGE%"\' -Force" '
+        '>> "%LOG%" 2>&1\r\n'
         "if errorlevel 1 (\r\n"
-        '  echo Update failed: cannot extract zip. 1>&2\r\n'
-        "  pause\r\n"
+        '  echo Update failed: cannot extract zip. See "%LOG%". >> "%LOG%"\r\n'
+        '  start "" /wait cmd /c "echo Update failed while extracting. See "%LOG%" & pause"\r\n'
         "  exit /b 1\r\n"
         ")\r\n"
         'set "SRC=%STAGE%"\r\n'
         'if exist "%STAGE%\\CiscoACLHelper\\%EXE%" set "SRC=%STAGE%\\CiscoACLHelper"\r\n'
-        f'robocopy "%SRC%" "%DST%" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /XF {xf}\r\n'
+        f'robocopy "%SRC%" "%DST%" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /XF {xf} >> "%LOG%" 2>&1\r\n'
         "ver>nul\r\n"
+        'echo [%date% %time%] copy done, restarting >> "%LOG%"\r\n'
         'start "" "%DST%\\%EXE%"\r\n'
         'del "%ZIP%" >nul 2>&1\r\n'
         'rmdir /s /q "%STAGE%" >nul 2>&1\r\n'
@@ -208,10 +260,20 @@ def write_apply_script(zip_path: str, target_dir: str, pid_to_wait: int) -> str:
 
 
 def launch_apply_and_exit(bat_path: str) -> None:
-    """Launch the apply script detached. Caller must quit the app right after."""
+    """Launch the apply script fully hidden and detached.
+
+    CREATE_NO_WINDOW is essential: without a console, every console-mode
+    child (previously tasklist/find/timeout in a loop) would pop its own
+    visible window. Caller must quit the app right after.
+    """
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE
     subprocess.Popen(
         ["cmd", "/c", bat_path],
-        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+        startupinfo=si,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        | getattr(subprocess, "DETACHED_PROCESS", 0)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
