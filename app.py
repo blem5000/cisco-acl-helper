@@ -1175,10 +1175,11 @@ class App(tk.Tk):
         if not dev_host:
             messagebox.showwarning("ACL", self.T("gen_need_dev"))
             return
-        dev = next((dict(d) for d in self.devices if d.get("host") == dev_host), None)
+        dev = self._lookup_device(dev_host)
         if dev is None:
             messagebox.showwarning("ACL", self.T("gen_need_dev"))
             return
+        dev_host = dev["host"]
         # collapse cameras now (pure, fast); fetch seq numbers in worker
         agg = self.gen_agg_var.get()
         grouped: list[tuple] = []
@@ -1311,13 +1312,15 @@ class App(tk.Tk):
                                if self.ent_gen_pc.get().strip() == ip else None))
 
     def _refresh_gen_devices(self):
-        hosts = [d.get("host", "") for d in self.devices if d.get("host")]
-        self.combo_gen_dev.configure(values=hosts)
-        if self.gen_dev_var.get() not in hosts:
-            self.gen_dev_var.set(hosts[0] if hosts else "")
-        self.combo_track_dev.configure(values=hosts)
-        if self.track_dev_var.get() not in hosts:
-            self.track_dev_var.set(hosts[0] if hosts else "")
+        labels = [self.dev_label(d) for d in self.devices if d.get("host")]
+        self.combo_gen_dev.configure(values=labels)
+        if self.gen_dev_var.get() not in labels:
+            cur = self._lookup_device(self.gen_dev_var.get().strip())
+            self.gen_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
+        self.combo_track_dev.configure(values=labels)
+        if self.track_dev_var.get() not in labels:
+            cur = self._lookup_device(self.track_dev_var.get().strip())
+            self.track_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
 
     # ---------- IP tracking tab (ARP -> MAC -> port -> CDP) ----------
     def _set_track_text(self, content: str):
@@ -1341,10 +1344,20 @@ class App(tk.Tk):
         self.prog_track.configure(value=0)
         self._set_track_text("")
 
-    def _lookup_device(self, host: str) -> dict | None:
-        if not host:
+    @staticmethod
+    def dev_label(d: dict) -> str:
+        """Dropdown display: 'hostname host' when hostname set, else plain host."""
+        host = d.get("host", "")
+        hn = (d.get("hostname") or "").strip()
+        return f"{hn} {host}".strip() if hn else host
+
+    def _lookup_device(self, selection: str) -> dict | None:
+        """Find device by dropdown label ('hostname host') or plain host."""
+        s = (selection or "").strip()
+        if not s:
             return None
-        return next((dict(d) for d in self.devices if d.get("host") == host), None)
+        return next((dict(d) for d in self.devices
+                     if d.get("host") == s or self.dev_label(d) == s), None)
 
     def trace_ip(self):
         if self.tracking:
@@ -1693,8 +1706,9 @@ class App(tk.Tk):
                         self.status.set(self.T("track_working").format(
                             ip=self.ent_track_ip.get().strip(), host=host))
                         try:
-                            if host in self.combo_track_dev.cget("values"):
-                                self.track_dev_var.set(host)
+                            dev = self._lookup_device(host)
+                            if dev is not None:
+                                self.track_dev_var.set(self.dev_label(dev))
                         except tk.TclError:
                             pass
                 elif kind == "track_done":
