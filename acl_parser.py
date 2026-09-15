@@ -295,6 +295,306 @@ def fmt_endpoint(net) -> str:
 RESEQUENCE_STEP = (10, 10)
 
 
+def _parse_endpoint(tokens: list[str], i: int) -> tuple[dict, int]:
+    """Parse one ACE endpoint at tokens[i]. Returns (ep, next_i).
+
+    ep = {"kind": "any"|"host"|"net"|"opaque", "text": str, "ip": int|None}.
+    Unknown shapes (object-group, ...) stay opaque: exact-text grouping
+    only, never merged or moved.
+    """
+    import ipaddress as _ip
+
+    def _mk(kind, text, ip=None):
+        return ({"kind": kind, "text": text, "ip": ip}, i + 1)
+
+    if i >= len(tokens):
+        return ({"kind": "opaque", "text": "", "ip": None}, i)
+    tok = tokens[i]
+    low = tok.lower()
+    if low == "any":
+        return ({"kind": "any", "text": "any", "ip": 0}, i + 1)
+    if low == "host" and i + 1 < len(tokens):
+        try:
+            addr = _ip.ip_address(tokens[i + 1])
+            return ({"kind": "host", "text": f"host {tokens[i + 1]}",
+                     "ip": int(addr)}, i + 2)
+        except ValueError:
+            pass
+    if low in ("addrgroup", "object-group") and i + 1 < len(tokens):
+        return ({"kind": "opaque",
+                 "text": f"{tok} {tokens[i + 1]}", "ip": None}, i + 2)
+    if i + 1 < len(tokens):
+        try:
+            addr = _ip.ip_address(tok)
+            wild = _ip.ip_address(tokens[i + 1])
+            net = _ip.ip_network((int(addr),
+                                  (~int(wild)) & 0xFFFFFFFF), strict=False)
+            return ({"kind": "net",
+                     "text": f"{tok} {tokens[i + 1]}",
+                     "ip": int(net.network_address)}, i + 2)
+        except ValueError:
+            pass
+    else:
+        try:
+            addr = _ip.ip_address(tok)
+            return ({"kind": "host", "text": f"host {tok}",
+                     "ip": int(addr)}, i + 1)
+        except ValueError:
+            pass
+    return ({"kind": "opaque", "text": tok, "ip": None}, i + 1)
+
+
+_PORT_OPS = ("eq", "neq", "lt", "gt", "range")
+
+
+def _parse_port_spec(tokens: list[str], i: int) -> tuple[str, int]:
+    """Parse optional src-port spec (eq www / range 1 2). Returns (text, next_i)."""
+    if i < len(tokens) and tokens[i].lower() in _PORT_OPS:
+        op = tokens[i].lower()
+        take = 3 if op == "range" else 2
+        return (" ".join(tokens[i:i + take]), min(i + take, len(tokens)))
+    return ("", i)
+
+
+def parse_ace(ace: str) -> dict | None:
+    """Parse one ACE line into a dict (None when not an ACE).
+
+    Result: {"seq", "kind" (permit/deny/remark/other), "action", "proto",
+    "src"/"dst" endpoint dicts, "src_opts", "options", "text" (no seq),
+    "raw"}. Unparseable shapes are kind "other"/opaque and are never
+    merged or moved by the optimizer (only renumbered in place).
+    """
+    m = re.match(r"^\s*(?:(\d+)\s+)?(permit|deny|remark)\b\s*(.*)$",
+                 ace, re.IGNORECASE)
+    if not m:
+        return None
+    seq = None
+    try:
+        seq = int(m.group(1)) if m.group(1) is not None else None
+    except ValueError:
+        pass
+    kind = m.group(2).lower()
+    rest = m.group(3).strip()
+    if kind == "remark":
+        return {"seq": seq, "kind": "remark", "text": rest, "raw": ace.strip()}
+    tokens = rest.split()
+    if len(tokens) < 3:
+        # e.g. truncated line: keep verbatim (with action word), never
+        # merged or moved - only renumbered in place.
+        text = re.sub(r"\s+", " ", f"{kind} {rest}").strip()
+        return {"seq": seq, "kind": "other", "text": text, "raw": ace.strip()}
+    action = kind
+    proto = tokens[0].lower()
+    src, i = _parse_endpoint(tokens, 1)
+    src_opts, i = _parse_port_spec(tokens, i)
+    dst, i = _parse_endpoint(tokens, i)
+    options = re.sub(r"\s+", " ", " ".join(tokens[i:])).strip()
+    text = re.sub(r"\s+", " ", f"{kind} {rest}").strip()
+    return {"seq": seq, "kind": action, "action": action, "proto": proto,
+            "src": src, "dst": dst, "src_opts": src_opts.lower(),
+            "options": options.lower(), "text": text, "raw": ace.strip()}
+
+
+def _ace_units(entries: list[str]) -> list[dict]:
+    """Group entries into units: {"remarks": [...], "ace": parsed|None}.
+
+    Remark lines attach to the FOLLOWING ace (our generator convention);
+    trailing remarks attach to the preceding unit (or stand alone).
+    """
+    units: list[dict] = []
+    pending: list[str] = []
+    for ace in entries or []:
+        p = parse_ace(ace)
+        if p is None:
+            continue
+        if p["kind"] == "remark":
+            pending.append(p["text"])
+            continue
+        units.append({"remarks": pending, "ace": p})
+        pending = []
+    if pending:
+        if units:
+            units[-1]["remarks"].extend(pending)
+        else:
+            units.append({"remarks": pending, "ace": None})
+    return units
+
+
+def _unit_key(unit: dict, sort_side: str) -> tuple | None:
+    """Sort key or None when the unit must not move."""
+    ace = unit.get("ace")
+    if ace is None or ace.get("kind") not in ("permit", "deny"):
+        return None
+    for side in ("src", "dst"):
+        if ace[side].get("kind") == "opaque":
+            return None
+    ep = ace["src"] if sort_side == "src" else ace["dst"]
+    if ep.get("ip") is None:
+        return None
+    return (ep["ip"],)
+
+
+def _swappable(u1: dict, u2: dict, sort_side: str) -> bool:
+    """True when two units may change order without changing semantics.
+
+    Only within the same action/proto/ports/shape: same-action rules yield
+    the same verdict regardless of order; different protos/ports never
+    match the same packet... (conservative: exact same shape required).
+    """
+    a, b = u1.get("ace"), u2.get("ace")
+    if a is None or b is None:
+        return False
+    if a.get("kind") not in ("permit", "deny"):
+        return False
+    if b.get("kind") != a["kind"]:
+        return False
+    if a.get("proto") != b.get("proto"):
+        return False
+    if a.get("src_opts") != b.get("src_opts"):
+        return False
+    if a.get("options") != b.get("options"):
+        return False
+    other = "dst" if sort_side == "src" else "src"
+    if a[other].get("text") != b[other].get("text"):
+        return False
+    if _unit_key(u1, sort_side) is None or _unit_key(u2, sort_side) is None:
+        return False
+    return True
+
+
+def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
+    """Propose an optimized version of one ACL's entries.
+
+    Safe transforms only: exact-duplicate removal, exact-cover CIDR
+    aggregation of host entries (same action/proto/ports/shape, remark-free
+    units), and reordering limited to provably swappable pairs (same
+    action + shape, so first-match semantics cannot change). Remarks stay
+    attached to their entry. Output is renumbered 10, 20, 30...
+
+    Returns {"deletes": [old seqs], "lines": ["10 remark ...", ...],
+             "stats": {"before", "after", "dup", "merged", "remarks"}}.
+    """
+    import ipaddress as _ip
+
+    if sort_side not in ("src", "dst"):
+        sort_side = "src"
+    other = "dst" if sort_side == "src" else "src"
+    units = _ace_units(entries)
+    stats = {"before": len(entries or []), "after": 0, "dup": 0,
+             "merged": 0, "remarks": 0}
+
+    # 1) exact duplicates (same ace shape, remarks transferred when possible)
+    seen: dict[tuple, int] = {}
+    kept: list[dict] = []
+    for u in units:
+        ace = u.get("ace")
+        if ace is None or ace.get("kind") not in ("permit", "deny"):
+            kept.append(u)
+            continue
+        key = (ace["kind"], ace["proto"], ace["src"]["text"],
+               ace["dst"]["text"], ace["src_opts"], ace["options"])
+        if key in seen:
+            stats["dup"] += 1
+            prev = kept[seen[key]]
+            if not prev["remarks"] and u["remarks"]:
+                prev["remarks"] = list(u["remarks"])
+            continue
+        seen[key] = len(kept)
+        kept.append(u)
+    units = kept
+
+    # 2) CIDR aggregation of remark-free all-host groups (exact cover only)
+    groups: dict[tuple, list[int]] = {}
+    for idx, u in enumerate(units):
+        ace = u.get("ace")
+        if (ace is None or ace.get("kind") not in ("permit", "deny")
+                or u["remarks"] or ace[sort_side].get("kind") != "host"):
+            continue
+        gkey = (ace["kind"], ace["proto"], ace[other]["text"],
+                ace["src_opts"], ace["options"])
+        groups.setdefault(gkey, []).append(idx)
+    merged: dict[int, list[dict]] = {}  # old index -> fresh units
+    consumed: set[int] = set()
+    for gkey, idxs in groups.items():
+        if len(idxs) < 2:
+            continue
+        nets = sorted(_ip.ip_network(f"{units[i]['ace'][sort_side]['text'].split()[1]}/32")
+                      for i in idxs)
+        collapsed = sorted(_ip.collapse_addresses(nets))
+        if len(collapsed) >= len(nets):
+            continue  # nothing merges
+        stats["merged"] += len(nets) - len(collapsed)
+        action, proto, other_text, src_opts, options = gkey
+        new_units: list[dict] = []
+        for net in collapsed:
+            if net.prefixlen == 32:
+                ep_text = f"host {net.network_address}"
+            else:
+                ep_text = f"{net.network_address} {net.hostmask}"
+            if sort_side == "src":
+                src_t, dst_t = ep_text, other_text
+            else:
+                src_t, dst_t = other_text, ep_text
+            text = f"{action} {proto} {src_t}"
+            if src_opts:
+                text += f" {src_opts}"
+            text += f" {dst_t}"
+            if options:
+                text += f" {options}"
+            parsed = parse_ace(text)
+            if parsed is None:  # pragma: no cover - built from valid parts
+                continue
+            new_units.append({"remarks": [], "ace": parsed})
+        if new_units:
+            merged[idxs[0]] = new_units
+            consumed.update(idxs[1:])
+    if consumed:
+        rebuilt: list[dict] = []
+        for i, u in enumerate(units):
+            if i in consumed:
+                continue
+            if i in merged:
+                rebuilt.extend(merged[i])
+            else:
+                rebuilt.append(u)
+        units = rebuilt
+
+    # 3) constrained bubble sort by sort-side IP (swappable pairs only)
+    def _key(u):
+        k = _unit_key(u, sort_side)
+        return k[0] if k else None
+
+    moved = True
+    while moved:
+        moved = False
+        for i in range(len(units) - 1):
+            k1, k2 = _key(units[i]), _key(units[i + 1])
+            if (k1 is not None and k2 is not None and k1 > k2
+                    and _swappable(units[i], units[i + 1], sort_side)):
+                units[i], units[i + 1] = units[i + 1], units[i]
+                moved = True
+
+    # 4) renumber + collect deletes
+    deletes: list[int] = []
+    for ace in entries or []:
+        p = parse_ace(ace)
+        if p and p.get("seq") is not None:
+            deletes.append(p["seq"])
+    lines: list[str] = []
+    n = 10
+    for u in units:
+        for r in u["remarks"]:
+            stats["remarks"] += 1
+            lines.append(f"{n} remark {r}")
+            n += 10
+        ace = u.get("ace")
+        if ace is not None and ace.get("kind") in ("permit", "deny", "other"):
+            lines.append(f"{n} {ace['text']}")
+            n += 10
+    stats["after"] = len(lines)
+    return {"deletes": deletes, "lines": lines, "stats": stats}
+
+
 def build_full_script(pc_ip: str,
                       groups: list[tuple[str, str, str, list]],
                       do_in: bool = True, do_out: bool = True,
