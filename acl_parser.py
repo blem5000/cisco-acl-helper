@@ -48,18 +48,70 @@ def find_ip(acls: dict[str, list[str]], ip: str) -> dict[str, list[str]]:
 
 
 def find_text(acls: dict[str, list[str]], query: str) -> dict[str, list[str]]:
-    """Filter ACLs to ACE lines containing `query` (case-insensitive).
+    """Filter ACLs to the person's block(s) + any matching lines.
 
-    Used for person (remark) search: "roman", "PAKHOLOK" and
-    "Roman Pakholok" all match "5961 remark Roman Pakholok".
+    Case-insensitive. Used for person (remark) search: "roman",
+    "PAKHOLOK" and "Roman Pakholok" all match the block
+      5961 remark Roman Pakholok
+      5962 permit ...
+      5966 remark Roman Pakholok (koniec)
+    and return it whole, so the results show WHERE the person has access,
+    not just the remark lines. A remark hit without a closing remark
+    extends to the next remark (or end of ACL). Non-remark lines matching
+    the query are returned individually, as before.
     """
-    query = (query or "").strip()
-    if not query:
+    q = (query or "").strip().lower()
+    if not q:
         return {}
-    pat = re.compile(re.escape(query), re.IGNORECASE)
+    # pasting a whole closing remark still finds its block
+    oq = q[:len(q) - len("(koniec)")].strip() if q.endswith("(koniec)") else q
+
+    def _parse(ace: str) -> tuple[str, str]:
+        """(kind, text) with the sequence number stripped."""
+        m = re.match(r"^\s*(?:\d+\s+)?(permit|deny|remark)\b\s*(.*)$",
+                     ace, re.IGNORECASE)
+        if not m:
+            return ("other", ace.strip())
+        return (m.group(1).lower(), m.group(2).strip())
+
+    def _is_close(text: str) -> bool:
+        return text.lower().endswith("(koniec)")
+
     found: dict[str, list[str]] = {}
     for name, aces in acls.items():
-        hits = [a for a in aces if pat.search(a)]
+        kinds = [_parse(a)[0] for a in aces]
+        texts = [_parse(a)[1] for a in aces]
+        keep = [False] * len(aces)
+        # 1) plain substring hits (any line kind)
+        for i, ace in enumerate(aces):
+            if q in ace.lower():
+                keep[i] = True
+        # 2) block expansion: remark <owner> .. remark <owner> (koniec)
+        pending: dict[str, int] = {}  # owner_lower -> open index
+        for i, ace in enumerate(aces):
+            if kinds[i] != "remark":
+                continue
+            text = texts[i]
+            if _is_close(text):
+                owner = text[:len(text) - len("(koniec)")].strip().lower()
+                if owner in pending and oq in owner:
+                    for j in range(pending[owner], i + 1):
+                        keep[j] = True
+                    del pending[owner]
+            else:
+                owner = text.lower()
+                if oq in owner:
+                    pending[owner] = i
+        # opens never closed: extend to the next remark (or end of ACL)
+        for owner, open_idx in pending.items():
+            end_idx = len(aces)
+            for j in range(open_idx + 1, len(aces)):
+                if kinds[j] == "remark":
+                    end_idx = j
+                    break
+            for j in range(open_idx, end_idx):
+                keep[j] = True
+        hits = [ace for ace, k in zip(aces, keep) if k]
         if hits:
             found[name] = hits
     return found
