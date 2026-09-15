@@ -152,6 +152,29 @@ def extract_seq_numbers(aces: list[str]) -> set[int]:
     return taken
 
 
+def find_pc_entries(entries: list[str], pc_ip: str) -> list[tuple[int, str]]:
+    """Existing permit/deny entries referencing `pc_ip`, in ACL order.
+
+    Returns [(seq, ace_text_without_seq), ...]. Remark lines are skipped
+    (they are regenerated from the owner name). Match is a whole-token
+    IP search, same as find_ip().
+    """
+    pat = re.compile(r"(?<![0-9.])" + re.escape(pc_ip.strip()) + r"(?![0-9.])")
+    out: list[tuple[int, str]] = []
+    for ace in entries or []:
+        m = re.match(r"^\s*(\d+)\s+(permit|deny)\b", ace, re.IGNORECASE)
+        if not m:
+            continue
+        if not pat.search(ace):
+            continue
+        try:
+            seq = int(m.group(1))
+        except ValueError:
+            continue
+        out.append((seq, ace[m.end(1):].strip()))  # verbatim ACE, seq stripped
+    return out
+
+
 def collapse_ips(ips: list[str]) -> list:
     """Collapse adjacent IPv4 hosts into minimal exact-cover networks.
 
@@ -183,20 +206,31 @@ def build_full_script(pc_ip: str,
                       do_in: bool = True, do_out: bool = True,
                       starts: dict[str, int] | None = None,
                       taken: dict[str, set[int]] | None = None,
-                      owner: str = "") -> str:
-    """Build the full paste script: conf t / resequences / stanzas / end / wr.
+                      owner: str = "",
+                      relocate: dict[str, list[tuple[int, str]]] | None = None) -> str:
+    """Build the full paste script: conf t / deletes / resequences / stanzas / end / wr.
 
     `groups`: [(acl_in, acl_out, note, [collapsed nets])] in output order.
     `starts`: {acl_name: first seq to try} - defaults to max(taken)+1
       (or 10 when the ACL is empty). Taken numbers are always skipped.
     `owner`: optional person name - emitted as a numbered `remark` line
-      before the permit entries of every stanza (sanitized, max 100 chars).
+      before the permit entries of every stanza (sanitized, max 100 chars),
+      plus a closing `remark "<owner> (koniec)"` after them so the whole
+      block for this computer stays visually grouped.
+    `relocate`: {acl_name: [(old_seq, ace_text), ...]} - existing entries
+      referencing this computer, found by find_pc_entries(). They are deleted
+      first (`no <seq>`, before any resequence) and re-emitted verbatim as
+      part of the new contiguous block, so everything for this computer
+      (remark + old + new entries) lands in one place. ACLs that only have
+      relocated entries still get their own stanza + resequences.
     No indentation - exactly the CLI paste format.
     Ends with a trailing newline so the last line executes on paste.
     """
     taken = taken or {}
     starts = starts or {}
+    relocate = relocate or {}
     owner = re.sub(r"\s+", " ", (owner or "").strip())[:100]
+    end_mark = f"{owner} (koniec)" if owner else ""
     lines: list[str] = ["conf t"]
     involved: list[str] = []  # ACLs in resequence/stanza order
     for acl_in, acl_out, _note, _nets in groups:
@@ -204,6 +238,36 @@ def build_full_script(pc_ip: str,
             involved.append(acl_in)
         if do_out and acl_out:
             involved.append(acl_out)
+
+    def _reloc(acl: str) -> list[tuple[int, str]]:
+        if acl in relocate:
+            return relocate[acl]
+        low = acl.lower()
+        for name, entries in relocate.items():
+            if name.lower() == low:
+                return entries
+        return []
+
+    # relocation-only ACLs (old entries, no new nets) still need stanzas
+    seen = set()
+    uniq: list[str] = []
+    for a in involved:
+        if a.lower() in seen:
+            continue
+        seen.add(a.lower())
+        uniq.append(a)
+    involved = uniq
+    for name in relocate:
+        if not any(name == a or name.lower() == a.lower() for a in involved):
+            involved.append(name)
+    # old entries are deleted BEFORE the first resequence (old numbers valid)
+    for acl in involved:
+        old = _reloc(acl)
+        if not old:
+            continue
+        lines.append(f"ip access-list extended {acl}")
+        for seq, _ace in old:
+            lines.append(f"no {seq}")
     r_start, r_step = RESEQUENCE_STEP
     for acl in involved:
         lines.append(f"ip access-list resequence {acl} {r_start} {r_step}")
@@ -227,22 +291,46 @@ def build_full_script(pc_ip: str,
         return n
 
     first_group = True
-    for acl_in, acl_out, _note, nets in groups:
+    for acl in involved:
+        old = _reloc(acl)
+        # new nets for this ACL from all groups (IN and OUT sides)
+        in_list: list = []
+        out_list: list = []
+        for acl_in, acl_out, _note, nets in groups:
+            if do_in and acl_in == acl:
+                in_list.extend(nets)
+            if do_out and acl_out == acl:
+                out_list.extend(nets)
+        if not old and not in_list and not out_list:
+            continue
         if not first_group:
             lines.append("")
         first_group = False
-        if do_in and acl_in:
-            lines.append(f"ip access-list extended {acl_in}")
-            if owner:
-                lines.append(f"{alloc(acl_in)} remark {owner}")
-            for net in nets:
-                lines.append(f"{alloc(acl_in)} permit ip {fmt_endpoint(net)} host {pc_ip}")
-        if do_out and acl_out:
-            lines.append(f"ip access-list extended {acl_out}")
-            if owner:
-                lines.append(f"{alloc(acl_out)} remark {owner}")
-            for net in nets:
-                lines.append(f"{alloc(acl_out)} permit ip host {pc_ip} {fmt_endpoint(net)}")
+        lines.append(f"ip access-list extended {acl}")
+        if owner:
+            lines.append(f"{alloc(acl)} remark {owner}")
+        seen_aces: set[str] = set()  # drop exact duplicates (old vs new overlap)
+        for _seq, ace in old:
+            if ace in seen_aces:
+                continue
+            seen_aces.add(ace)
+            lines.append(f"{alloc(acl)} {ace}")
+        for net in in_list:
+            ace = f"permit ip {fmt_endpoint(net)} host {pc_ip}"
+            if ace in seen_aces:
+                continue
+            seen_aces.add(ace)
+            lines.append(f"{alloc(acl)} {ace}")
+        for net in out_list:
+            ace = f"permit ip host {pc_ip} {fmt_endpoint(net)}"
+            if ace in seen_aces:
+                continue
+            seen_aces.add(ace)
+            lines.append(f"{alloc(acl)} {ace}")
+        if end_mark:
+            lines.append(f"{alloc(acl)} remark {end_mark}")
+        if end_mark:
+            lines.append(f"{alloc(acl)} remark {end_mark}")
     lines.append("")
     for acl in involved:
         lines.append(f"ip access-list resequence {acl} {r_start} {r_step}")

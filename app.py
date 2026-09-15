@@ -321,6 +321,8 @@ class App(tk.Tk):
         self._gen_auto: dict[str, int] = {}
         self._gen_taken: dict[str, set[int]] = {}
         self._gen_fetch_key = None
+        self._gen_aces: dict[str, list[tuple[int, str]]] = {}
+        self._gen_aces_key = None
         self.last_results: list[tuple] = []  # (host, found_dict, err|None)
         self.last_ip: str = ""
         self.searching = False
@@ -506,12 +508,15 @@ class App(tk.Tk):
         self.gen_in_var = tk.BooleanVar(value=True)
         self.gen_out_var = tk.BooleanVar(value=True)
         self.gen_agg_var = tk.BooleanVar(value=True)
+        self.gen_group_var = tk.BooleanVar(value=True)
         self.chk_gen_in = ttk.Checkbutton(gopts, text="", variable=self.gen_in_var)
         self.chk_gen_in.pack(side="left", padx=(0, 12))
         self.chk_gen_out = ttk.Checkbutton(gopts, text="", variable=self.gen_out_var)
         self.chk_gen_out.pack(side="left", padx=12)
         self.chk_gen_agg = ttk.Checkbutton(gopts, text="", variable=self.gen_agg_var)
         self.chk_gen_agg.pack(side="left", padx=(18, 0))
+        self.chk_gen_group = ttk.Checkbutton(gopts, text="", variable=self.gen_group_var)
+        self.chk_gen_group.pack(side="left", padx=(18, 0))
 
         grow = ttk.Frame(self.tab_gen)
         grow.pack(fill="x", padx=10, pady=(6, 0))
@@ -708,6 +713,7 @@ class App(tk.Tk):
         self.chk_gen_in.configure(text=S["gen_in"])
         self.chk_gen_out.configure(text=S["gen_out"])
         self.chk_gen_agg.configure(text=S["gen_agg"])
+        self.chk_gen_group.configure(text=S["gen_group"])
         self.lbl_gen_dev.configure(text=S["gen_dev_label"])
         self.lbl_gen_starts.configure(text=S["gen_starts"])
         self.lbl_gen_dhcp.configure(text=S["dhcp_idle"], foreground="gray")
@@ -1377,16 +1383,18 @@ class App(tk.Tk):
         self.status.set(self.T("gen_fetching").format(host=dev_host))
         reuse_taken = self._gen_taken if fetch_key == self._gen_fetch_key else None
         server = self.dhcp_var.get().strip()
+        group = self.gen_group_var.get()
         threading.Thread(target=self._gen_worker,
                          args=(pc, dev, grouped, do_in, do_out, fetch_key,
-                               reuse_taken, server, owner),
+                               reuse_taken, server, owner, group),
                          daemon=True).start()
 
     def _gen_worker(self, pc, dev, grouped, do_in, do_out, fetch_key,
-                    reuse_taken, server, owner=""):
+                    reuse_taken, server, owner="", group=True):
         dhcp_status, dhcp_detail = (dhcp_check.check_reservation(server, pc)
                                     if server else ("idle", ""))
         taken = reuse_taken
+        aces: dict[str, list[tuple[int, str]]] | None = None
         err = None
         if taken is None:
             try:
@@ -1396,24 +1404,31 @@ class App(tk.Tk):
                     debug_log=self._ssh_debug_log())
                 acls = acl_parser.parse_running_config(cfg)
                 taken = {}
+                aces = {}
+                for name, entries in acls.items():
+                    found = acl_parser.find_pc_entries(entries, pc)
+                    if found:
+                        aces[name] = found
                 for acl_in, acl_out, _note, _nets in grouped:
                     for acl in (acl_in, acl_out):
                         if acl and acl not in taken:
                             entries = acls.get(acl, [])
                             if not entries:
-                                for name, aces in acls.items():
+                                for name, aces_list in acls.items():
                                     if name.lower() == acl.lower():
-                                        entries = aces
+                                        entries = aces_list
                                         break
                             taken[acl] = acl_parser.extract_seq_numbers(entries)
             except Exception as e:
                 if "Empty response" in str(e):
                     taken = {}  # reachable, just no ACL text found
+                    aces = aces or {}
                 else:
                     err = str(e)
         self.msg_queue.put(("gen_done", (pc, dev["host"], grouped, do_in, do_out,
                                          fetch_key, taken, err,
-                                         dhcp_status, dhcp_detail, owner)))
+                                         dhcp_status, dhcp_detail, owner,
+                                         aces, group)))
 
     @staticmethod
     def _involved_acls(grouped, do_in, do_out) -> list:
@@ -1917,7 +1932,7 @@ class App(tk.Tk):
                     messagebox.showinfo("ACL", payload)
                 elif kind == "gen_done":
                     (pc, host, grouped, do_in, do_out, fetch_key, taken, err,
-                     dhcp_status, dhcp_detail, owner) = payload
+                     dhcp_status, dhcp_detail, owner, aces, group) = payload
                     self.generating = False
                     self.btn_gen.configure(state="normal")
                     try:
@@ -1933,6 +1948,12 @@ class App(tk.Tk):
                     else:
                         self._gen_taken = taken
                         self._gen_fetch_key = fetch_key
+                        if aces is not None:
+                            self._gen_aces = aces
+                            self._gen_aces_key = fetch_key
+                        relocate = (self._gen_aces
+                                    if group and self._gen_aces_key == fetch_key
+                                    else {})
                         involved = self._involved_acls(grouped, do_in, do_out)
                         self._update_starts_frame(involved, taken)
                         starts = self._read_gen_starts(involved)
@@ -1940,7 +1961,8 @@ class App(tk.Tk):
                         if starts is None:
                             continue
                         self.gen_script = acl_parser.build_full_script(
-                            pc, grouped, do_in, do_out, starts, taken, owner=owner)
+                            pc, grouped, do_in, do_out, starts, taken,
+                            owner=owner, relocate=relocate)
                         self._set_gen_text(self.gen_script)
                         if dhcp_status == "none":
                             messagebox.showwarning(
