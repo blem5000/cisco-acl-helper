@@ -332,7 +332,8 @@ class App(tk.Tk):
         self.apply_language()
         self.after(100, self._poll_queue)
         self.after(200, self._startup_unlock)
-        self.after(3000, self._auto_update_check)
+        # NOTE: auto update check is scheduled at the end of _startup_unlock,
+        # so the update dialog never pops up under/over the master-password box.
 
     # ---------- helpers ----------
     def T(self, key: str) -> str:
@@ -626,10 +627,14 @@ class App(tk.Tk):
                      self.tab_sub, self.tab_set):
             self.nb.add(_tab, text="")
 
-        # status bar
+        # status bar + small version stamp on the right
         self.status = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w").pack(
-            fill="x", side="bottom", padx=2, pady=2)
+        status_fr = ttk.Frame(self)
+        status_fr.pack(fill="x", side="bottom", padx=2, pady=2)
+        ttk.Label(status_fr, textvariable=self.status, relief="sunken", anchor="w").pack(
+            side="left", fill="x", expand=True)
+        ttk.Label(status_fr, text=f"v{APP_VERSION}", foreground="gray",
+                  font=("TkDefaultFont", 8)).pack(side="right", padx=6)
         self.ent_ip.bind("<Return>", lambda _e: self.start_search())
         self.ent_track_ip.bind("<Return>", lambda _e: self.trace_ip())
         self.ent_gen_pc.bind("<FocusOut>", lambda _e: self._dhcp_check_async())
@@ -876,6 +881,13 @@ class App(tk.Tk):
 
     # ---------- master / store ----------
     def _startup_unlock(self):
+        try:
+            self._startup_unlock_inner()
+        finally:
+            # only now is it safe to show the update dialog (no modal grab open)
+            self.after(2000, self._auto_update_check)
+
+    def _startup_unlock_inner(self):
         is_new = not os.path.exists(DEVICES_FILE)
         dlg = MasterDialog(self, self.lang, is_new)
         self.wait_window(dlg)
