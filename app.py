@@ -466,6 +466,11 @@ class App(tk.Tk):
         self.ent_gen_acl_out.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=4)
         self.lbl_gen_dhcp = ttk.Label(gf, text="", foreground="gray")
         self.lbl_gen_dhcp.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.lbl_gen_owner = ttk.Label(gf, text="")
+        self.lbl_gen_owner.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.ent_gen_owner = ttk.Entry(gf, width=40, font=("Consolas", 11))
+        self.ent_gen_owner.grid(row=3, column=1, columnspan=2, sticky="w",
+                                padx=(16, 0), pady=(6, 0))
 
         self.lbl_gen_cams = ttk.Label(self.tab_gen, text="")
         self.lbl_gen_cams.pack(anchor="w", padx=10)
@@ -677,6 +682,7 @@ class App(tk.Tk):
         self.btn_sub_edit.configure(text=S["edit_btn"])
         self.btn_sub_del.configure(text=S["del_btn"])
         self.lbl_gen_pc.configure(text=S["gen_pc_label"])
+        self.lbl_gen_owner.configure(text=S["gen_owner_label"])
         self.lbl_gen_acl_in.configure(text=S["gen_acl_in_label"])
         self.lbl_gen_acl_out.configure(text=S["gen_acl_out_label"])
         self.lbl_gen_cams.configure(text=S["gen_cams_label"])
@@ -1142,6 +1148,7 @@ class App(tk.Tk):
         do_in, do_out = self.gen_in_var.get(), self.gen_out_var.get()
         in_typed = self.ent_gen_acl_in.get().strip()
         out_typed = self.ent_gen_acl_out.get().strip()
+        owner = self.ent_gen_owner.get().strip()
         groups: list[tuple[str, str, str, list[str]]] = []
         if in_typed or out_typed:
             # manual mode: typed names apply to all cameras
@@ -1215,11 +1222,11 @@ class App(tk.Tk):
         server = self.dhcp_var.get().strip()
         threading.Thread(target=self._gen_worker,
                          args=(pc, dev, grouped, do_in, do_out, fetch_key,
-                               reuse_taken, server),
+                               reuse_taken, server, owner),
                          daemon=True).start()
 
     def _gen_worker(self, pc, dev, grouped, do_in, do_out, fetch_key,
-                    reuse_taken, server):
+                    reuse_taken, server, owner=""):
         dhcp_status, dhcp_detail = (dhcp_check.check_reservation(server, pc)
                                     if server else ("idle", ""))
         taken = reuse_taken
@@ -1249,7 +1256,7 @@ class App(tk.Tk):
                     err = str(e)
         self.msg_queue.put(("gen_done", (pc, dev["host"], grouped, do_in, do_out,
                                          fetch_key, taken, err,
-                                         dhcp_status, dhcp_detail)))
+                                         dhcp_status, dhcp_detail, owner)))
 
     @staticmethod
     def _involved_acls(grouped, do_in, do_out) -> list:
@@ -1544,15 +1551,22 @@ class App(tk.Tk):
     def _refresh_copy_combo(self):
         """List only devices with actual hits; keep selection if still valid."""
         hosts = [h for h, f, e in self.last_results if f and not e]
-        self.copy_combo.configure(values=hosts)
-        if self.copy_host_var.get() not in hosts:
-            self.copy_host_var.set(hosts[0] if hosts else "")
+        labels = [self._copy_label(h) for h in hosts]
+        self.copy_combo.configure(values=labels)
+        if self.copy_host_var.get() not in labels:
+            self.copy_host_var.set(labels[0] if labels else "")
+
+    def _copy_label(self, host: str) -> str:
+        dev = self._lookup_device(host)
+        return self.dev_label(dev) if dev else host
 
     def copy_results(self):
         # Copy ONLY the selected device's paste-safe CLI lines
         # (device context as "!" comments, ACL headers, ACE lines),
         # ending with Enter so the last line runs.
-        host = self.copy_host_var.get()
+        sel = self.copy_host_var.get().strip()
+        dev = self._lookup_device(sel)
+        host = dev["host"] if dev else sel
         picked = [(h, f, e) for h, f, e in self.last_results if h == host and f and not e]
         if not picked:
             messagebox.showinfo("ACL", self.T("nothing_to_copy"))
@@ -1746,7 +1760,7 @@ class App(tk.Tk):
                     messagebox.showinfo("ACL", payload)
                 elif kind == "gen_done":
                     (pc, host, grouped, do_in, do_out, fetch_key, taken, err,
-                     dhcp_status, dhcp_detail) = payload
+                     dhcp_status, dhcp_detail, owner) = payload
                     self.generating = False
                     self.btn_gen.configure(state="normal")
                     try:
@@ -1769,7 +1783,7 @@ class App(tk.Tk):
                         if starts is None:
                             continue
                         self.gen_script = acl_parser.build_full_script(
-                            pc, grouped, do_in, do_out, starts, taken)
+                            pc, grouped, do_in, do_out, starts, taken, owner=owner)
                         self._set_gen_text(self.gen_script)
                         if dhcp_status == "none":
                             messagebox.showwarning(

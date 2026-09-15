@@ -182,17 +182,21 @@ def build_full_script(pc_ip: str,
                       groups: list[tuple[str, str, str, list]],
                       do_in: bool = True, do_out: bool = True,
                       starts: dict[str, int] | None = None,
-                      taken: dict[str, set[int]] | None = None) -> str:
+                      taken: dict[str, set[int]] | None = None,
+                      owner: str = "") -> str:
     """Build the full paste script: conf t / resequences / stanzas / end / wr.
 
     `groups`: [(acl_in, acl_out, note, [collapsed nets])] in output order.
     `starts`: {acl_name: first seq to try} - defaults to max(taken)+1
       (or 10 when the ACL is empty). Taken numbers are always skipped.
-    No indentation, no remarks - exactly the CLI paste format.
+    `owner`: optional person name - emitted as a numbered `remark` line
+      before the permit entries of every stanza (sanitized, max 100 chars).
+    No indentation - exactly the CLI paste format.
     Ends with a trailing newline so the last line executes on paste.
     """
     taken = taken or {}
     starts = starts or {}
+    owner = re.sub(r"\s+", " ", (owner or "").strip())[:100]
     lines: list[str] = ["conf t"]
     involved: list[str] = []  # ACLs in resequence/stanza order
     for acl_in, acl_out, _note, _nets in groups:
@@ -229,10 +233,14 @@ def build_full_script(pc_ip: str,
         first_group = False
         if do_in and acl_in:
             lines.append(f"ip access-list extended {acl_in}")
+            if owner:
+                lines.append(f"{alloc(acl_in)} remark {owner}")
             for net in nets:
                 lines.append(f"{alloc(acl_in)} permit ip {fmt_endpoint(net)} host {pc_ip}")
         if do_out and acl_out:
             lines.append(f"ip access-list extended {acl_out}")
+            if owner:
+                lines.append(f"{alloc(acl_out)} remark {owner}")
             for net in nets:
                 lines.append(f"{alloc(acl_out)} permit ip host {pc_ip} {fmt_endpoint(net)}")
     lines.append("")
