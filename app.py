@@ -327,6 +327,7 @@ class App(tk.Tk):
         self._audit_host = ""
         self._audit_proposal = ""
         self._audit_fetching = False
+        self._vlan_fetching = False
         self.last_results: list[tuple] = []  # (host, found_dict, err|None)
         self.last_ip: str = ""
         self.searching = False
@@ -457,6 +458,18 @@ class App(tk.Tk):
         # --- Tab 3: subnets ---
         self.tab_sub = ttk.Frame(self.nb)
         self.nb.add(self.tab_sub, text="subnets")
+        subv = ttk.Frame(self.tab_sub)
+        subv.pack(fill="x", padx=10, pady=(10, 0))
+        self.lbl_sub_dev = ttk.Label(subv, text="")
+        self.lbl_sub_dev.pack(side="left")
+        self.sub_dev_var = tk.StringVar(value="")
+        self.combo_sub_dev = ttk.Combobox(subv, textvariable=self.sub_dev_var,
+                                          state="readonly", width=24, values=[])
+        self.combo_sub_dev.pack(side="left", padx=(6, 0))
+        self.btn_sub_fetch = ttk.Button(subv, text="",
+                                        command=self.fetch_vlan_subnets)
+        self.btn_sub_fetch.pack(side="left", padx=8)
+        self.sub_prog = ttk.Progressbar(subv, mode="indeterminate", length=120)
         self.lbl_sub = ttk.Label(self.tab_sub, text="")
         self.lbl_sub.pack(anchor="w", padx=10, pady=(10, 4))
         subcols = ("subnet", "acl_in", "acl_out")
@@ -785,6 +798,8 @@ class App(tk.Tk):
         self.btn_del.configure(text=S["del_btn"])
         self.btn_test.configure(text=S["test_btn"])
         self.lbl_sub.configure(text=S["subnets_label"])
+        self.lbl_sub_dev.configure(text=S["subnet_dev_label"])
+        self.btn_sub_fetch.configure(text=S["subnet_fetch_btn"])
         self.subtree.heading("subnet", text=S["col_subnet"])
         self.subtree.heading("acl_in", text=S["col_acl_in"])
         self.subtree.heading("acl_out", text=S["col_acl_out"])
@@ -1427,6 +1442,78 @@ class App(tk.Tk):
             self._update_lock_label()
 
     # ---------- subnets tab actions ----------
+    def fetch_vlan_subnets(self):
+        if self._vlan_fetching:
+            return
+        if not self._require_unlocked():
+            return
+        if not self.devices:
+            messagebox.showwarning("ACL", self.T("status_no_devices"))
+            return
+        dev = self._lookup_device(self.sub_dev_var.get().strip())
+        if dev is None:
+            messagebox.showwarning("ACL", self.T("audit_need_dev"))
+            return
+        self._vlan_fetching = True
+        self.btn_sub_fetch.configure(state="disabled")
+        self.sub_prog.pack(side="left", padx=(14, 0))
+        self.sub_prog.start(12)
+        self.status.set(self.T("vlan_fetching").format(host=dev["host"]))
+        threading.Thread(target=self._vlan_worker, args=(dev,),
+                         daemon=True).start()
+
+    def _vlan_worker(self, dev: dict):
+        try:
+            out = cisco_ssh.run_commands(
+                dev["host"], dev["username"], dev.get("password", ""),
+                dev.get("enable") or None, int(dev.get("port", 22)),
+                timeout=15,
+                commands=["show running-config | section ^interface"],
+                debug_log=self._ssh_debug_log())
+            rows = acl_parser.parse_vlan_acls(
+                out.get("show running-config | section ^interface", ""))
+            self.msg_queue.put(("vlan_list", (dev["host"], rows)))
+        except Exception as e:
+            self.msg_queue.put(("vlan_error", (dev["host"], str(e))))
+
+    def _finish_vlan_fetch(self, host: str, rows: list):
+        self._vlan_fetching = False
+        self.btn_sub_fetch.configure(state="normal")
+        try:
+            self.sub_prog.stop()
+        except tk.TclError:
+            pass
+        self.sub_prog.pack_forget()
+        self.status.set(self.T("status_ready"))
+        added, updated, skipped = 0, 0, 0
+        for row in rows:
+            subnet = row.get("subnet", "")
+            if not subnet or not (row.get("acl_in") or row.get("acl_out")):
+                skipped += 1
+                continue
+            cur = next((s for s in self.subnets if s.get("subnet") == subnet),
+                       None)
+            if cur is None:
+                self.subnets.append({"subnet": subnet,
+                                     "acl_in": row.get("acl_in", ""),
+                                     "acl_out": row.get("acl_out", "")})
+                added += 1
+                continue
+            changed = False
+            for key in ("acl_in", "acl_out"):
+                if row.get(key) and cur.get(key) != row[key]:
+                    cur[key] = row[key]
+                    changed = True
+            if changed:
+                updated += 1
+        if added or updated:
+            self.persist_store()
+        self.refresh_subnets()
+        messagebox.showinfo(
+            "ACL", self.T("vlan_imported").format(host=host, added=added,
+                                                  updated=updated,
+                                                  skipped=skipped))
+
     def _selected_subnet_idx(self) -> int | None:
         sel = self.subtree.selection()
         if not sel:
@@ -1752,6 +1839,10 @@ class App(tk.Tk):
         if self.audit_dev_var.get() not in labels:
             cur = self._lookup_device(self.audit_dev_var.get().strip())
             self.audit_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
+        self.combo_sub_dev.configure(values=labels)
+        if self.sub_dev_var.get() not in labels:
+            cur = self._lookup_device(self.sub_dev_var.get().strip())
+            self.sub_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
 
     # ---------- IP tracking tab (ARP -> MAC -> port -> CDP) ----------
     def _set_track_text(self, content: str):
@@ -2187,6 +2278,21 @@ class App(tk.Tk):
                     except tk.TclError:
                         pass
                     self.audit_prog.pack_forget()
+                    self.status.set(self.T("status_ready"))
+                    messagebox.showerror(
+                        "ACL", self.T("gen_fetch_fail").format(host=host, err=err))
+                elif kind == "vlan_list":
+                    host, rows = payload
+                    self._finish_vlan_fetch(host, rows)
+                elif kind == "vlan_error":
+                    host, err = payload
+                    self._vlan_fetching = False
+                    self.btn_sub_fetch.configure(state="normal")
+                    try:
+                        self.sub_prog.stop()
+                    except tk.TclError:
+                        pass
+                    self.sub_prog.pack_forget()
                     self.status.set(self.T("status_ready"))
                     messagebox.showerror(
                         "ACL", self.T("gen_fetch_fail").format(host=host, err=err))

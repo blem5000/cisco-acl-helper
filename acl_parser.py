@@ -182,6 +182,64 @@ def normalize_subnet(s: dict) -> dict:
             "acl_in": acl_in, "acl_out": acl_out}
 
 
+def parse_vlan_acls(config_text: str) -> list[dict]:
+    """VLAN interfaces with their subnet + applied ACLs.
+
+    Scans `interface Vlan<N>` blocks for the primary `ip address` and
+    `ip access-group NAME in|out` lines. Returns a list of
+    {"vlan", "interface", "subnet" (CIDR, "" when no usable IP),
+     "acl_in", "acl_out"} in config order. Secondary/HSRP addresses are
+    ignored; interfaces without an IP get an empty subnet.
+    """
+    import ipaddress as _ip
+
+    rows: list[dict] = []
+    current: dict | None = None
+
+    def _flush():
+        if current is not None:
+            rows.append(current)
+
+    for raw in (config_text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line == "!":
+            _flush()
+            current = None
+            continue
+        m = re.match(r"^interface\s+Vlan\s*(\d+)\s*$", line, re.IGNORECASE)
+        if m:
+            _flush()
+            num = m.group(1)
+            current = {"vlan": num, "interface": f"Vlan{num}", "subnet": "",
+                       "acl_in": "", "acl_out": ""}
+            continue
+        if re.match(r"^interface\s+", line, re.IGNORECASE):
+            _flush()
+            current = None
+            continue
+        if current is None:
+            continue
+        m = re.match(r"^ip\s+address\s+(\S+)\s+(\S+)(.*)$", line, re.IGNORECASE)
+        if m and not current["subnet"]:
+            tail = m.group(3).lower()
+            if "secondary" not in tail:
+                try:
+                    current["subnet"] = str(_ip.ip_network(
+                        f"{m.group(1)}/{m.group(2)}", strict=False))
+                except ValueError:
+                    pass
+            continue
+        m = re.match(r"^ip\s+access-group\s+(\S+)\s+(in|out)\s*$",
+                     line, re.IGNORECASE)
+        if m:
+            current["acl_in" if m.group(2).lower() == "in" else "acl_out"] = m.group(1)
+            continue
+    _flush()
+    return rows
+
+
 def resolve_acl_for_ip(subnets: list[dict], ip: str) -> tuple[str, str, str] | None:
     """Find the (ACL-IN, ACL-OUT) pair for an IP via longest-prefix match.
 
