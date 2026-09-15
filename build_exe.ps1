@@ -17,6 +17,17 @@ python -m PyInstaller --noconfirm --clean --onedir --noconsole `
   --collect-submodules cryptography `
   app.py
 
+# separate updater program (own window with progress, no cmd/powershell).
+# Single-file on purpose: it is copied to %TEMP% and run from there so it
+# can replace every file in the app folder, including its own bundled copy.
+# Stdlib + tkinter only, so the onefile unpack cost is negligible.
+python -m PyInstaller --noconfirm --clean --onefile --noconsole `
+  --name "CiscoACLHelperUpdater" `
+  updater_app.py
+
+$UpdSrc = "dist\CiscoACLHelperUpdater.exe"
+if (Test-Path $UpdSrc) { Move-Item $UpdSrc "dist\CiscoACLHelper\CiscoACLHelperUpdater.exe" -Force }
+
 $Zip = "dist\CiscoACLHelper-windows.zip"
 if (Test-Path $Zip) { Remove-Item $Zip -Force }
 Compress-Archive -Path "dist\CiscoACLHelper" -DestinationPath $Zip

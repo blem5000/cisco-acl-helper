@@ -323,6 +323,12 @@ class App(tk.Tk):
         self._update_prog_var: tk.StringVar | None = None
         self._update_cancel = threading.Event()
         self._update_zip_path: str | None = None
+        # --- silent pre-unlock update state ---
+        self._boot_dlg: tk.Toplevel | None = None
+        self._boot_phase: tk.StringVar | None = None
+        self._boot_prog: ttk.Progressbar | None = None
+        self._boot_update_finished = False
+        self._boot_update_done = False
 
         self.title(STRINGS[self.lang]["app_title"])
         self.geometry("860x620")
@@ -331,9 +337,11 @@ class App(tk.Tk):
         self._build_widgets()
         self.apply_language()
         self.after(100, self._poll_queue)
-        self.after(200, self._startup_unlock)
-        # NOTE: auto update check is scheduled at the end of _startup_unlock,
-        # so the update dialog never pops up under/over the master-password box.
+        self.after(100, self._startup_update_check)
+        # NOTE: the password unlock runs after the silent pre-startup update
+        # check (see _startup_update_check), so a fresh update never asks
+        # for the password twice. The post-unlock auto check is a fallback
+        # for when the pre-startup one did not run.
 
     # ---------- helpers ----------
     def T(self, key: str) -> str:
@@ -741,11 +749,135 @@ class App(tk.Tk):
 
     # ---------- self-update (GitHub Releases) ----------
     def _auto_update_check(self):
+        # skipped when the silent pre-startup check already ran this session
+        if getattr(self, "_boot_update_done", False):
+            return
         try:
             if self.upd_auto_var.get() and not self._checking_update:
                 self.check_for_updates(manual=False)
         except Exception:
             pass
+
+    def _startup_update_check(self):
+        """Silent pre-unlock update: if a newer release exists, download and
+        install it without asking, then exit into the updater program.
+        Otherwise continue to the password unlock. Respects the auto-update
+        setting and the skipped version; failures fall through to unlock."""
+        if not updater.is_frozen() or not self.upd_auto_var.get():
+            self._startup_unlock()
+            return
+        self._checking_update = True
+        self._boot_update_finished = False
+        self._update_cancel.clear()
+        dlg = tk.Toplevel(self)
+        self._boot_dlg = dlg
+        dlg.title(self.T("boot_upd_title"))
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._boot_phase = tk.StringVar(value=self.T("boot_upd_checking"))
+        ttk.Label(dlg, textvariable=self._boot_phase).pack(
+            anchor="w", padx=14, pady=(12, 4))
+        self._boot_prog = ttk.Progressbar(dlg, mode="determinate", length=340,
+                                          maximum=1000)
+        self._boot_prog.pack(fill="x", padx=14)
+        ttk.Button(dlg, text=self.T("cancel_btn"),
+                   command=self._cancel_boot_update).pack(
+                       anchor="e", padx=14, pady=10)
+        dlg.protocol("WM_DELETE_WINDOW", self._cancel_boot_update)
+        try:
+            dlg.geometry("+%d+%d" % (self.winfo_x() + 200, self.winfo_y() + 150))
+        except tk.TclError:
+            pass
+        threading.Thread(target=self._boot_update_worker, daemon=True).start()
+
+    def _cancel_boot_update(self):
+        if self._boot_update_finished:
+            return
+        self._update_cancel.set()
+        try:
+            if self._boot_phase is not None:
+                self._boot_phase.set(self.T("boot_upd_checking"))
+        except tk.TclError:
+            pass
+
+    def _boot_update_worker(self):
+        try:
+            info = updater.fetch_latest_release(timeout=10)
+        except Exception:
+            self.msg_queue.put(("boot_upd_none", None))
+            return
+        try:
+            newer = updater.is_newer(info["tag"], APP_VERSION)
+        except Exception:
+            newer = False
+        if not newer:
+            self.msg_queue.put(("boot_upd_none", None))
+            return
+        if self._update_cancel.is_set() or info["tag"] == load_skipped_version():
+            self.msg_queue.put(("boot_upd_none", None))
+            return
+        try:
+            dest = updater.temp_download_path(info["tag"])
+
+            def _cb(done: int, total: int):
+                self.msg_queue.put(("boot_upd_prog", (done, total, info["tag"])))
+
+            updater.download_asset(info["zip_url"], dest, progress_cb=_cb,
+                                   cancel_event=self._update_cancel, timeout=30)
+        except Exception:
+            # cancelled downloads land here too ("cancelled") -> just unlock
+            self.msg_queue.put(("boot_upd_none", None))
+            return
+        if self._update_cancel.is_set():
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            self.msg_queue.put(("boot_upd_none", None))
+            return
+        try:
+            exe_name = os.path.basename(updater.exe_path())
+            if not exe_name.lower().endswith(".exe"):
+                exe_name = "CiscoACLHelper.exe"
+            bundled = os.path.join(updater.app_dir(), "CiscoACLHelperUpdater.exe")
+            if not os.path.isfile(bundled):
+                # old install without the updater program: unlock, the
+                # post-unlock dialog flow will handle the update instead
+                self.msg_queue.put(("boot_upd_none", None))
+                return
+            staged = updater.stage_gui_updater(bundled)
+            updater.launch_gui_updater(staged, dest, updater.app_dir(),
+                                       exe_name, os.getpid(),
+                                       updater.proc_start_unix(os.getpid()),
+                                       info["tag"])
+        except Exception:
+            self.msg_queue.put(("boot_upd_none", None))
+            return
+        self.msg_queue.put(("boot_upd_exit", None))
+
+    def _close_boot_dlg(self):
+        try:
+            if self._boot_dlg is not None and self._boot_dlg.winfo_exists():
+                self._boot_dlg.destroy()
+        except tk.TclError:
+            pass
+        finally:
+            self._boot_dlg = None
+            try:
+                self.grab_release()
+            except tk.TclError:
+                pass
+
+    def _finish_boot_update(self):
+        """Proceed to unlock (once) after the silent check completes."""
+        self._checking_update = False
+        self._close_boot_dlg()
+        if self._boot_update_finished:
+            return
+        self._boot_update_finished = True
+        self._boot_update_done = True
+        self._startup_unlock()
 
     def check_for_updates(self, manual: bool = True):
         if self._checking_update:
@@ -871,19 +1003,29 @@ class App(tk.Tk):
                 parent=self._update_dialog):
             return
         try:
-            bat = updater.write_apply_script(zip_path, updater.app_dir(), os.getpid())
-        except Exception as e:
-            messagebox.showerror("ACL", self.T("upd_error").format(err=e),
-                                 parent=self._update_dialog)
-            return
-        try:
-            updater.launch_apply_and_exit(bat)
+            self._launch_installer(zip_path, info["tag"])
         except Exception as e:
             messagebox.showerror("ACL", self.T("upd_error").format(err=e),
                                  parent=self._update_dialog)
             return
         self.destroy()
         os._exit(0)
+
+    def _launch_installer(self, zip_path: str, tag: str):
+        """Prefer the separate GUI updater window; fall back to hidden .bat
+        when its exe is missing (e.g. updating from an older version)."""
+        exe_name = os.path.basename(updater.exe_path())
+        if not exe_name.lower().endswith(".exe"):
+            exe_name = "CiscoACLHelper.exe"
+        bundled = os.path.join(updater.app_dir(), "CiscoACLHelperUpdater.exe")
+        if updater.is_frozen() and os.path.isfile(bundled):
+            staged = updater.stage_gui_updater(bundled)
+            updater.launch_gui_updater(staged, zip_path, updater.app_dir(),
+                                       exe_name, os.getpid(),
+                                       updater.proc_start_unix(os.getpid()), tag)
+            return
+        bat = updater.write_apply_script(zip_path, updater.app_dir(), os.getpid())
+        updater.launch_apply_and_exit(bat)
 
     # ---------- master / store ----------
     def _startup_unlock(self):
@@ -1847,6 +1989,27 @@ class App(tk.Tk):
                     messagebox.showerror(
                         "ACL", self.T("upd_error").format(err=payload),
                         parent=self._update_dialog)
+                elif kind == "boot_upd_prog":
+                    done, total, tag = payload
+                    try:
+                        if self._boot_prog is not None:
+                            if total:
+                                self._boot_prog.configure(value=done * 1000 // total)
+                            else:
+                                self._boot_prog.configure(mode="indeterminate")
+                                self._boot_prog.start(10)
+                        if self._boot_phase is not None:
+                            pct = f"{done * 100 // total}%" if total else f"{done // 1024} KB"
+                            self._boot_phase.set(
+                                self.T("upd_downloading").format(tag=tag, pct=pct))
+                    except tk.TclError:
+                        pass
+                elif kind == "boot_upd_none":
+                    self._finish_boot_update()
+                elif kind == "boot_upd_exit":
+                    self._close_boot_dlg()
+                    self.destroy()
+                    os._exit(0)
         except queue.Empty:
             pass
         self.after(200, self._poll_queue)

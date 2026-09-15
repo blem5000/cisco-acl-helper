@@ -4,11 +4,15 @@ Flow (onedir build):
   1. fetch_latest_release() -> {"tag", "name", "body", "zip_url", "zip_size"}
   2. is_newer(latest_tag, current_version) compares "v1.4.0"-style tags.
   3. download_asset() streams the CiscoACLHelper-windows.zip to temp with progress.
-  4. write_apply_script() creates a .bat that waits for our PID to exit,
-     extracts the zip and robocopies it over the app dir (preserving user
-     files), then restarts the exe. App launches the bat detached and quits.
+  4. Preferred: stage_gui_updater() + launch_gui_updater() run the separate
+     CiscoACLHelperUpdater.exe (own Tk window with progress, no cmd /
+     powershell windows at all). It waits for our PID, extracts the zip
+     (zipfile), copies files over the app dir (shutil, preserving user
+     files), restarts the exe and cleans up.
+  5. Fallback (updater exe missing, e.g. updating from an old version):
+     write_apply_script() creates a hidden .bat doing the same steps.
 
-User files that are NEVER overwritten (robocopy /XF + not present in zip):
+User files that are NEVER overwritten (excluded from copy):
   devices.enc, config.json, ssh_debug.log, ssh_probe.log
 """
 
@@ -16,10 +20,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
+import zipfile
 
 from version import __version__ as CURRENT_VERSION
 
@@ -154,40 +161,223 @@ def temp_download_path(tag: str) -> str:
     return path
 
 
-def _own_start_unix() -> int:
-    """Unix timestamp (seconds) of current process start, Windows only.
+_PROCESS_QUERY_LIMITED = 0x1000
+_SYNCHRONIZE = 0x100000
+_WAIT_OBJECT_0 = 0x00000000
 
-    Used to guard against PID reuse: the apply script proceeds immediately
-    if the process currently holding our PID started at a different time.
-    Returns 0 when unavailable (check is then skipped).
+
+def _k32():
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetProcessTimes.restype = wintypes.BOOL
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    return k32
+
+
+def _handle_start_unix(k32, h) -> int:
+    import ctypes
+    from ctypes import wintypes
+    creation = wintypes.FILETIME()
+    dummy1 = wintypes.FILETIME()
+    dummy2 = wintypes.FILETIME()
+    dummy3 = wintypes.FILETIME()
+    if not k32.GetProcessTimes(h, ctypes.byref(creation),
+                               ctypes.byref(dummy1),
+                               ctypes.byref(dummy2),
+                               ctypes.byref(dummy3)):
+        return 0
+    ft = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+    return int(ft // 10000000 - 11644473600)
+
+
+def proc_start_unix(pid: int) -> int:
+    """Unix timestamp (seconds) of process `pid` start, Windows only.
+
+    Returns 0 when the process does not exist or the time is unavailable.
+    Used to guard against PID reuse: a PID holder with a different start
+    time is a different process.
     """
     try:
-        import ctypes
-        from ctypes import wintypes
-        k32 = ctypes.windll.kernel32
-        k32.OpenProcess.restype = wintypes.HANDLE
-        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        k32.GetProcessTimes.restype = wintypes.BOOL
-        # PROCESS_QUERY_LIMITED_INFORMATION is enough and never fails for self
-        h = k32.OpenProcess(0x1000, False, k32.GetCurrentProcessId())
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return 0
+    if pid <= 0:
+        return 0
+    try:
+        k32 = _k32()
+        # PROCESS_QUERY_LIMITED_INFORMATION suffices for the start time
+        h = k32.OpenProcess(_PROCESS_QUERY_LIMITED, False, pid)
         if not h:
             return 0
         try:
-            creation = wintypes.FILETIME()
-            dummy1 = wintypes.FILETIME()
-            dummy2 = wintypes.FILETIME()
-            dummy3 = wintypes.FILETIME()
-            if not k32.GetProcessTimes(h, ctypes.byref(creation),
-                                       ctypes.byref(dummy1),
-                                       ctypes.byref(dummy2),
-                                       ctypes.byref(dummy3)):
-                return 0
+            return _handle_start_unix(k32, h)
         finally:
             k32.CloseHandle(h)
-        ft = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
-        return int(ft // 10000000 - 11644473600)
     except Exception:
         return 0
+
+
+def _own_start_unix() -> int:
+    """Unix timestamp (seconds) of current process start. 0 when unavailable."""
+    try:
+        import ctypes
+        return proc_start_unix(int(ctypes.windll.kernel32.GetCurrentProcessId()))
+    except Exception:
+        return 0
+
+
+def wait_for_exit(pid: int, expected_start: int = 0, poll: float = 0.5) -> bool:
+    """Block until `pid` exited (or is held by a different process). Always True.
+
+    Uses WaitForSingleObject on a fresh handle: unlike OpenProcess success
+    (which also succeeds for already-exited processes while anyone still
+    holds a handle to them), the wait handle is signaled only on real exit.
+    `expected_start`: value from _own_start_unix() of the waited-on process;
+    0 disables the PID-reuse check.
+    """
+    pid = int(pid or 0)
+    if pid <= 0:
+        return True
+    k32 = _k32()
+    wait_ms = max(50, int(poll * 1000))
+    while True:
+        h = k32.OpenProcess(_PROCESS_QUERY_LIMITED | _SYNCHRONIZE, False, pid)
+        if not h:
+            return True  # no such process
+        try:
+            if expected_start:
+                if _handle_start_unix(k32, h) != int(expected_start):
+                    return True  # PID reused by a different process
+            if k32.WaitForSingleObject(h, wait_ms) == _WAIT_OBJECT_0:
+                return True  # exited
+        finally:
+            k32.CloseHandle(h)
+
+
+def extract_zip(zip_path: str, staging: str, progress_cb=None) -> str:
+    """Extract zip -> staging dir. progress_cb(done_bytes, total_bytes)."""
+    if os.path.isdir(staging):
+        shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as z:
+        infos = z.infolist()
+        total = sum(i.file_size for i in infos) or 1
+        done = 0
+        for info in infos:
+            z.extract(info, staging)
+            done += info.file_size
+            if progress_cb:
+                progress_cb(done, total)
+    if progress_cb:
+        progress_cb(total, total)
+    return staging
+
+
+def resolve_source(staging: str, exe_name: str) -> str:
+    """Release zips contain a top-level CiscoACLHelper/ folder; return it
+    when present, else the staging dir itself."""
+    inner = os.path.join(staging, "CiscoACLHelper")
+    if os.path.isfile(os.path.join(inner, exe_name)):
+        return inner
+    return staging
+
+
+def copy_tree(src: str, dst: str, exclude_names=(), progress_cb=None,
+              retries: int = 5) -> None:
+    """Copy src -> dst, skipping `exclude_names` basenames (user files).
+
+    progress_cb(done_bytes, total_bytes). Retries locked files (the old app
+    may still be releasing handles) before giving up.
+    """
+    excluded = set(exclude_names or ())
+    jobs: list[tuple[str, str, int]] = []
+    total = 0
+    for root, _dirs, files in os.walk(src):
+        for fn in files:
+            if fn in excluded:
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, src)
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = 0
+            jobs.append((full, rel, size))
+            total += size
+    total = total or 1
+    done = 0
+    for full, rel, size in jobs:
+        target = os.path.join(dst, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        last_err: Exception | None = None
+        for attempt in range(max(1, retries)):
+            try:
+                shutil.copy2(full, target)
+                last_err = None
+                break
+            except OSError as e:
+                last_err = e
+                time.sleep(1)
+        if last_err is not None:
+            raise RuntimeError(f"Cannot replace {rel}: {last_err}")
+        done += size
+        if progress_cb:
+            progress_cb(done, total)
+    if progress_cb:
+        progress_cb(total, total)
+
+
+def clear_skipped_version(target_dir: str) -> None:
+    """Reset update_skipped in target config.json (best effort)."""
+    try:
+        cfg_path = os.path.join(target_dir, "config.json")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("update_skipped"):
+            data["update_skipped"] = ""
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+    except Exception:
+        pass
+
+
+def stage_gui_updater(src_exe: str) -> str:
+    """Copy the bundled updater exe to a fixed temp dir and return its path.
+
+    The updater must NOT run from the app dir: it replaces every file there
+    (including its own bundled copy, which would be locked while running).
+    """
+    run_dir = os.path.join(tempfile.gettempdir(), "acl_updater_run")
+    os.makedirs(run_dir, exist_ok=True)
+    dst = os.path.join(run_dir, "CiscoACLHelperUpdater.exe")
+    try:
+        shutil.copy2(src_exe, dst)
+        return dst
+    except OSError:
+        alt = os.path.join(run_dir, f"CiscoACLHelperUpdater_{os.getpid()}.exe")
+        shutil.copy2(src_exe, alt)
+        return alt
+
+
+def launch_gui_updater(updater_exe: str, zip_path: str, target_dir: str,
+                       exe_name: str, pid: int, pid_start: int, tag: str) -> None:
+    """Start the GUI updater (windowed exe: no console ever). Caller quits."""
+    subprocess.Popen(
+        [updater_exe, "--zip", zip_path, "--target", target_dir,
+         "--exe", exe_name, "--pid", str(pid),
+         "--pid-start", str(pid_start), "--tag", tag],
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        | getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        close_fds=True,
+    )
 
 
 def write_apply_script(zip_path: str, target_dir: str, pid_to_wait: int) -> str:

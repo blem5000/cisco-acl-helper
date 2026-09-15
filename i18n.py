@@ -146,6 +146,8 @@ STRINGS = {
         "upd_install_confirm": "Install update {tag} now? The app will close.",
         "upd_error": "Update check failed:\n{err}",
         "upd_devmode": "Running from source (not .exe) — install is disabled, showing info only.",
+        "boot_upd_title": "Checking for updates",
+        "boot_upd_checking": "Checking for updates...",
     },
     "pl": {
         "app_title": "Pomocnik Cisco ACL",
@@ -294,6 +296,8 @@ STRINGS = {
         "upd_install_confirm": "Zainstalować aktualizację {tag}? Aplikacja zostanie zamknięta.",
         "upd_error": "Sprawdzenie aktualizacji nie powiodło się:\n{err}",
         "upd_devmode": "Uruchomiono ze źródeł (nie .exe) — instalacja wyłączona, tylko podgląd.",
+        "boot_upd_title": "Sprawdzanie aktualizacji",
+        "boot_upd_checking": "Sprawdzanie aktualizacji...",
     },
 }
 
