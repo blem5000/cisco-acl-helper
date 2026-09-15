@@ -152,26 +152,50 @@ def extract_seq_numbers(aces: list[str]) -> set[int]:
     return taken
 
 
-def find_pc_entries(entries: list[str], pc_ip: str) -> list[tuple[int, str]]:
-    """Existing permit/deny entries referencing `pc_ip`, in ACL order.
+def clean_owner(owner: str) -> str:
+    """Sanitize the person name for IOS remarks (single spaces, max 100)."""
+    return re.sub(r"\s+", " ", (owner or "").strip())[:100]
 
-    Returns [(seq, ace_text_without_seq), ...]. Remark lines are skipped
-    (they are regenerated from the owner name). Match is a whole-token
-    IP search, same as find_ip().
+
+def owner_end_mark(owner: str) -> str:
+    """Closing remark text bracketing the computer's block ("" when no owner)."""
+    owner = clean_owner(owner)
+    return f"{owner} (koniec)" if owner else ""
+
+
+def find_pc_entries(entries: list[str], pc_ip: str, owner: str = ""
+                    ) -> list[tuple[int, str, bool]]:
+    """Existing entries of this computer's block, in ACL order.
+
+    Returns [(seq, ace_text_without_seq, reemit), ...]:
+      - permit/deny lines referencing `pc_ip` (whole-token match) are
+        re-emitted verbatim as part of the new contiguous block,
+      - the block's own remark lines (`remark <owner>` /
+        `remark <owner> (koniec)`) are delete-only, so regeneration never
+        leaves stale duplicate remarks behind.
+    Other remarks are never touched.
     """
     pat = re.compile(r"(?<![0-9.])" + re.escape(pc_ip.strip()) + r"(?![0-9.])")
-    out: list[tuple[int, str]] = []
+    owner = clean_owner(owner)
+    end = owner_end_mark(owner)
+    out: list[tuple[int, str, bool]] = []
     for ace in entries or []:
-        m = re.match(r"^\s*(\d+)\s+(permit|deny)\b", ace, re.IGNORECASE)
+        m = re.match(r"^\s*(\d+)\s+(permit|deny|remark)\b", ace, re.IGNORECASE)
         if not m:
-            continue
-        if not pat.search(ace):
             continue
         try:
             seq = int(m.group(1))
         except ValueError:
             continue
-        out.append((seq, ace[m.end(1):].strip()))  # verbatim ACE, seq stripped
+        rest = ace[m.end(1):].strip()
+        kind = m.group(2).lower()
+        if kind in ("permit", "deny"):
+            if pat.search(ace):
+                out.append((seq, rest, True))  # verbatim ACE, seq stripped
+        elif owner and kind == "remark":
+            text = re.sub(r"(?i)^remark\b\s*", "", rest)
+            if text == owner or text == end:
+                out.append((seq, rest, False))
     return out
 
 
@@ -207,7 +231,7 @@ def build_full_script(pc_ip: str,
                       starts: dict[str, int] | None = None,
                       taken: dict[str, set[int]] | None = None,
                       owner: str = "",
-                      relocate: dict[str, list[tuple[int, str]]] | None = None) -> str:
+                      relocate: dict[str, list[tuple[int, str, bool]]] | None = None) -> str:
     """Build the full paste script: conf t / deletes / resequences / stanzas / end / wr.
 
     `groups`: [(acl_in, acl_out, note, [collapsed nets])] in output order.
@@ -217,20 +241,21 @@ def build_full_script(pc_ip: str,
       before the permit entries of every stanza (sanitized, max 100 chars),
       plus a closing `remark "<owner> (koniec)"` after them so the whole
       block for this computer stays visually grouped.
-    `relocate`: {acl_name: [(old_seq, ace_text), ...]} - existing entries
-      referencing this computer, found by find_pc_entries(). They are deleted
-      first (`no <seq>`, before any resequence) and re-emitted verbatim as
-      part of the new contiguous block, so everything for this computer
-      (remark + old + new entries) lands in one place. ACLs that only have
-      relocated entries still get their own stanza + resequences.
+    `relocate`: {acl_name: [(old_seq, ace_text, reemit), ...]} - existing
+      entries of this computer's block, found by find_pc_entries(). They are
+      deleted first (`no <seq>`, before any resequence); permit/deny lines
+      are re-emitted verbatim as part of the new contiguous block, so
+      everything for this computer (remark + old + new entries) lands in
+      one place. ACLs that only have relocated entries still get their own
+      stanza + resequences.
     No indentation - exactly the CLI paste format.
     Ends with a trailing newline so the last line executes on paste.
     """
     taken = taken or {}
     starts = starts or {}
     relocate = relocate or {}
-    owner = re.sub(r"\s+", " ", (owner or "").strip())[:100]
-    end_mark = f"{owner} (koniec)" if owner else ""
+    owner = clean_owner(owner)
+    end_mark = owner_end_mark(owner)
     lines: list[str] = ["conf t"]
     involved: list[str] = []  # ACLs in resequence/stanza order
     for acl_in, acl_out, _note, _nets in groups:
@@ -239,7 +264,7 @@ def build_full_script(pc_ip: str,
         if do_out and acl_out:
             involved.append(acl_out)
 
-    def _reloc(acl: str) -> list[tuple[int, str]]:
+    def _reloc(acl: str) -> list[tuple[int, str, bool]]:
         if acl in relocate:
             return relocate[acl]
         low = acl.lower()
@@ -266,7 +291,7 @@ def build_full_script(pc_ip: str,
         if not old:
             continue
         lines.append(f"ip access-list extended {acl}")
-        for seq, _ace in old:
+        for seq, _ace, _keep in old:
             lines.append(f"no {seq}")
     r_start, r_step = RESEQUENCE_STEP
     for acl in involved:
@@ -310,7 +335,9 @@ def build_full_script(pc_ip: str,
         if owner:
             lines.append(f"{alloc(acl)} remark {owner}")
         seen_aces: set[str] = set()  # drop exact duplicates (old vs new overlap)
-        for _seq, ace in old:
+        for _seq, ace, keep in old:
+            if not keep:
+                continue  # stale own remark: deleted above, not re-emitted
             if ace in seen_aces:
                 continue
             seen_aces.add(ace)
@@ -327,8 +354,6 @@ def build_full_script(pc_ip: str,
                 continue
             seen_aces.add(ace)
             lines.append(f"{alloc(acl)} {ace}")
-        if end_mark:
-            lines.append(f"{alloc(acl)} remark {end_mark}")
         if end_mark:
             lines.append(f"{alloc(acl)} remark {end_mark}")
     lines.append("")

@@ -321,7 +321,7 @@ class App(tk.Tk):
         self._gen_auto: dict[str, int] = {}
         self._gen_taken: dict[str, set[int]] = {}
         self._gen_fetch_key = None
-        self._gen_aces: dict[str, list[tuple[int, str]]] = {}
+        self._gen_aces: dict[str, list[tuple[int, str, bool]]] = {}
         self._gen_aces_key = None
         self.last_results: list[tuple] = []  # (host, found_dict, err|None)
         self.last_ip: str = ""
@@ -1394,7 +1394,7 @@ class App(tk.Tk):
         dhcp_status, dhcp_detail = (dhcp_check.check_reservation(server, pc)
                                     if server else ("idle", ""))
         taken = reuse_taken
-        aces: dict[str, list[tuple[int, str]]] | None = None
+        aces: dict[str, list[tuple[int, str, bool]]] | None = None
         err = None
         if taken is None:
             try:
@@ -1406,7 +1406,7 @@ class App(tk.Tk):
                 taken = {}
                 aces = {}
                 for name, entries in acls.items():
-                    found = acl_parser.find_pc_entries(entries, pc)
+                    found = acl_parser.find_pc_entries(entries, pc, owner)
                     if found:
                         aces[name] = found
                 for acl_in, acl_out, _note, _nets in grouped:
