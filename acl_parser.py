@@ -47,6 +47,24 @@ def find_ip(acls: dict[str, list[str]], ip: str) -> dict[str, list[str]]:
     return found
 
 
+def find_text(acls: dict[str, list[str]], query: str) -> dict[str, list[str]]:
+    """Filter ACLs to ACE lines containing `query` (case-insensitive).
+
+    Used for person (remark) search: "roman", "PAKHOLOK" and
+    "Roman Pakholok" all match "5961 remark Roman Pakholok".
+    """
+    query = (query or "").strip()
+    if not query:
+        return {}
+    pat = re.compile(re.escape(query), re.IGNORECASE)
+    found: dict[str, list[str]] = {}
+    for name, aces in acls.items():
+        hits = [a for a in aces if pat.search(a)]
+        if hits:
+            found[name] = hits
+    return found
+
+
 def format_results(found: dict[str, list[str]], negate: bool = False) -> str:
     """Format exactly like the requested example.
 

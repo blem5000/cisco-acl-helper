@@ -1269,6 +1269,29 @@ class App(tk.Tk):
         self.txt_gen.insert("1.0", content)
         self.txt_gen.configure(state="disabled")
 
+    def _toast(self, text: str, ms: int = 3000):
+        """Small non-modal confirmation that closes itself after `ms`."""
+        try:
+            tip = tk.Toplevel(self)
+        except tk.TclError:
+            return
+        tip.title("ACL")
+        tip.resizable(False, False)
+        tip.transient(self)
+        ttk.Label(tip, text=text).pack(padx=16, pady=14)
+        try:
+            tip.geometry("+%d+%d" % (self.winfo_x() + 200, self.winfo_y() + 150))
+        except tk.TclError:
+            pass
+
+        def _close():
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+
+        tip.after(ms, _close)
+
     def clear_gen(self):
         self.gen_script = ""
         self._set_gen_text("")
@@ -1279,7 +1302,7 @@ class App(tk.Tk):
             return
         self.clipboard_clear()
         self.clipboard_append(self.gen_script)
-        messagebox.showinfo("ACL", self.T("copied"))
+        self._toast(self.T("copied"))
 
     def generate_acl(self):
         pc = self.ent_gen_pc.get().strip()
@@ -1749,7 +1772,7 @@ class App(tk.Tk):
             return
         self.clipboard_clear()
         self.clipboard_append(script)
-        messagebox.showinfo("ACL", self.T("copied"))
+        self._toast(self.T("copied"))
 
     def export_results(self):
         content = self.txt.get("1.0", tk.END).strip()
@@ -1778,9 +1801,10 @@ class App(tk.Tk):
         if not self._require_unlocked():
             return
         ip = self.ent_ip.get().strip()
-        if not self._valid_ip(ip):
-            messagebox.showwarning("ACL", self.T("status_bad_ip"))
+        if not ip:
+            messagebox.showwarning("ACL", self.T("status_bad_query"))
             return
+        by_ip = self._valid_ip(ip)
         if not self.devices:
             messagebox.showwarning("ACL", self.T("status_no_devices"))
             return
@@ -1795,12 +1819,13 @@ class App(tk.Tk):
         self.btn_stop.configure(state="normal")
         self.prog.configure(maximum=len(self.devices), value=0)
         self.status.set(self.T("status_searching").format(n=len(self.devices)))
-        threading.Thread(target=self._search_worker, args=(ip,), daemon=True).start()
+        threading.Thread(target=self._search_worker, args=(ip, by_ip),
+                         daemon=True).start()
 
     def stop_search(self):
         self.stop_event.set()
 
-    def _search_worker(self, ip: str):
+    def _search_worker(self, ip: str, by_ip: bool = True):
         negate = self.negate_var.get()
         total_hits = 0
         done_devs = 0
@@ -1812,7 +1837,10 @@ class App(tk.Tk):
                                              d.get("enable") or None, int(d.get("port", 22)),
                                              debug_log=self._ssh_debug_log())
                 acls = acl_parser.parse_running_config(cfg)
-                found = acl_parser.find_ip(acls, ip)
+                if by_ip:
+                    found = acl_parser.find_ip(acls, ip)
+                else:
+                    found = acl_parser.find_text(acls, ip)
                 return (host, found, None)
             except Exception as e:
                 return (host, {}, str(e))
