@@ -111,7 +111,8 @@ class MasterDialog(tk.Toplevel):
         super().__init__(parent)
         self.result: str | None = None
         self._is_new = is_new
-        S = STRINGS[lang]
+        self._lang = lang if lang in VALID_LANGS else "en"
+        S = STRINGS[self._lang]
         self.title(S["master_new_title"] if is_new else S["master_enter_title"])
         self.resizable(False, False)
         self.grab_set()
@@ -124,10 +125,13 @@ class MasterDialog(tk.Toplevel):
             ttk.Label(self, text=S["master_repeat"]).grid(row=2, column=0, sticky="w", padx=12, pady=(8, 4))
             self.e2 = ttk.Entry(self, show="*", width=32)
             self.e2.grid(row=3, column=0, padx=12, pady=2)
+            ttk.Label(self, text=S["pwd_req_hint"], foreground="gray",
+                      wraplength=300, justify="left").grid(
+                          row=4, column=0, sticky="w", padx=12, pady=(6, 0))
         else:
             self.e2 = None
         btns = ttk.Frame(self)
-        btns.grid(row=4, column=0, pady=12)
+        btns.grid(row=5, column=0, pady=12)
         ttk.Button(btns, text=S["unlock_btn"], command=self._on_ok).pack(side="left", padx=6)
         ttk.Button(btns, text=S["cancel_btn"], command=self._on_cancel).pack(side="left", padx=6)
 
@@ -140,14 +144,20 @@ class MasterDialog(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
 
     def _on_ok(self):
-        S = STRINGS["en"]  # validation messages handled by caller lang
+        S = STRINGS[self._lang]
         p1 = self.e1.get()
         if not p1:
-            messagebox.showwarning("ACL", "Password cannot be empty / Hasło nie może być puste.")
+            messagebox.showwarning("ACL", S["master_empty"])
             return
         if self._is_new:
             if self.e2 and self.e2.get() != p1:
-                messagebox.showwarning("ACL", "Passwords do not match / Hasła nie są zgodne.")
+                messagebox.showwarning("ACL", S["master_mismatch"])
+                return
+            missing = crypto_store.password_missing(p1)
+            if missing:
+                items = "\n".join(S[f"pwd_req_{m}"] for m in missing)
+                messagebox.showwarning(
+                    "ACL", S["pwd_not_met"].format(items=items))
                 return
         self.result = p1
         self.destroy()
@@ -299,6 +309,7 @@ class App(tk.Tk):
         super().__init__()
         self.lang = load_lang()
         self.master_pw: str | None = None
+        self._weak_warned = False  # warn once per session about weak master pw
         self.devices: list[dict] = []
         self.subnets: list[dict] = []  # {"subnet": ..., "acl_in": ..., "acl_out": ...}
         self.gen_script: str = ""
@@ -1068,6 +1079,10 @@ class App(tk.Tk):
             except ValueError:
                 messagebox.showerror("ACL", self.T("wrong_master"))
                 self.master_pw = None
+        if self.master_pw and not self._weak_warned:
+            if crypto_store.password_missing(self.master_pw):
+                self._weak_warned = True
+                messagebox.showwarning("ACL", self.T("pwd_weak_warn"))
         self._update_lock_label()
         self.refresh_tree()
         self.refresh_subnets()

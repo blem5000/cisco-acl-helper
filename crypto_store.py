@@ -21,6 +21,31 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 KDF_ITERATIONS = 200_000
 
+# Master-password policy (critical infrastructure access):
+# at least this many chars + all four character classes.
+MASTER_MIN_LENGTH = 12
+
+
+def password_missing(pw: str) -> list[str]:
+    """Unmet master-password requirements, as keys.
+
+    Subset of {"length", "lower", "upper", "digit", "special"}.
+    Empty list = password meets the policy.
+    """
+    pw = pw or ""
+    missing: list[str] = []
+    if len(pw) < MASTER_MIN_LENGTH:
+        missing.append("length")
+    if not any(c.islower() for c in pw):
+        missing.append("lower")
+    if not any(c.isupper() for c in pw):
+        missing.append("upper")
+    if not any(c.isdigit() for c in pw):
+        missing.append("digit")
+    if not any(not c.isalnum() for c in pw):
+        missing.append("special")
+    return missing
+
 
 def _derive_key(master: str, salt: bytes) -> bytes:
     kdf = PBKDF2HMAC(
