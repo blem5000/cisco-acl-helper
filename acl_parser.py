@@ -326,9 +326,9 @@ def _parse_endpoint(tokens: list[str], i: int) -> tuple[dict, int]:
     if i + 1 < len(tokens):
         try:
             addr = _ip.ip_address(tok)
-            wild = _ip.ip_address(tokens[i + 1])
-            net = _ip.ip_network((int(addr),
-                                  (~int(wild)) & 0xFFFFFFFF), strict=False)
+            mask = _ip.ip_address((~int(_ip.ip_address(tokens[i + 1])))
+                                  & 0xFFFFFFFF)
+            net = _ip.ip_network(f"{addr}/{mask}", strict=False)
             return ({"kind": "net",
                      "text": f"{tok} {tokens[i + 1]}",
                      "ip": int(net.network_address)}, i + 2)
@@ -396,27 +396,38 @@ def parse_ace(ace: str) -> dict | None:
 
 
 def _ace_units(entries: list[str]) -> list[dict]:
-    """Group entries into units: {"remarks": [...], "ace": parsed|None}.
+    """Group entries into units: {"remarks": [...], "ace": parsed|None,
+    "trailing": [...]}
 
-    Remark lines attach to the FOLLOWING ace (our generator convention);
-    trailing remarks attach to the preceding unit (or stand alone).
+    Opening remarks attach to the FOLLOWING ace (our generator convention);
+    CLOSING remarks (`... (koniec)`) attach as `trailing` of the PRECEDING
+    unit, so they print after their block even when sorting moves things.
+    Trailing remarks of a unit left without a following ace go to the last
+    unit's remarks (or stand alone).
     """
     units: list[dict] = []
+
+    def _new_unit(remarks, ace):
+        return {"remarks": list(remarks), "ace": ace, "trailing": []}
+
     pending: list[str] = []
     for ace in entries or []:
         p = parse_ace(ace)
         if p is None:
             continue
         if p["kind"] == "remark":
-            pending.append(p["text"])
+            if p["text"].lower().endswith("(koniec)") and units:
+                units[-1]["trailing"].append(p["text"])
+            else:
+                pending.append(p["text"])
             continue
-        units.append({"remarks": pending, "ace": p})
+        units.append(_new_unit(pending, p))
         pending = []
     if pending:
         if units:
             units[-1]["remarks"].extend(pending)
         else:
-            units.append({"remarks": pending, "ace": None})
+            units.append(_new_unit(pending, None))
     return units
 
 
@@ -469,7 +480,9 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
     aggregation of host entries (same action/proto/ports/shape, remark-free
     units), and reordering limited to provably swappable pairs (same
     action + shape, so first-match semantics cannot change). Remarks stay
-    attached to their entry. Output is renumbered 10, 20, 30...
+    attached to their entry; closing remarks (`... (koniec)`) additionally
+    absorb following same-shape entries, so the block stays grouped.
+    Output is renumbered 10, 20, 30...
 
     Returns {"deletes": [old seqs], "lines": ["10 remark ...", ...],
              "stats": {"before", "after", "dup", "merged", "remarks"}}.
@@ -498,17 +511,22 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
             prev = kept[seen[key]]
             if not prev["remarks"] and u["remarks"]:
                 prev["remarks"] = list(u["remarks"])
+            if not prev.get("trailing") and u.get("trailing"):
+                prev["trailing"] = list(u["trailing"])
             continue
         seen[key] = len(kept)
         kept.append(u)
     units = kept
 
-    # 2) CIDR aggregation of remark-free all-host groups (exact cover only)
+    # 2) CIDR aggregation of remark-free all-host groups (exact cover only).
+    # Units carrying remarks (incl. trailing closes) stay individual, so
+    # no remark is ever lost inside a merged supernet.
     groups: dict[tuple, list[int]] = {}
     for idx, u in enumerate(units):
         ace = u.get("ace")
         if (ace is None or ace.get("kind") not in ("permit", "deny")
-                or u["remarks"] or ace[sort_side].get("kind") != "host"):
+                or u["remarks"] or u.get("trailing")
+                or ace[sort_side].get("kind") != "host"):
             continue
         gkey = (ace["kind"], ace["proto"], ace[other]["text"],
                 ace["src_opts"], ace["options"])
@@ -544,7 +562,7 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
             parsed = parse_ace(text)
             if parsed is None:  # pragma: no cover - built from valid parts
                 continue
-            new_units.append({"remarks": [], "ace": parsed})
+            new_units.append({"remarks": [], "trailing": [], "ace": parsed})
         if new_units:
             merged[idxs[0]] = new_units
             consumed.update(idxs[1:])
@@ -574,6 +592,38 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
                 units[i], units[i + 1] = units[i + 1], units[i]
                 moved = True
 
+    # 3b) hand closing remarks past same-shape followers: crossing a remark
+    # never changes packet matching, so `remark X (koniec)` is emitted after
+    # same-shape entries that followed it on the device (stays grouped).
+    # Shape ignores the sorted endpoint itself (block members differ in it).
+    def _pull_key(u):
+        ace = u.get("ace")
+        if ace is None:
+            return None
+        if ace.get("kind") in ("permit", "deny"):
+            return (ace["kind"], ace["proto"], ace[other]["text"],
+                    ace["src_opts"], ace["options"])
+        return ("other", ace.get("text", ""))
+
+    i = 0
+    while i < len(units):
+        trailing = units[i].get("trailing")
+        if trailing:
+            anchor = _pull_key(units[i])
+            j = i + 1
+            while j < len(units):
+                nxt = units[j]
+                if (nxt["remarks"] or nxt.get("trailing")
+                        or nxt.get("ace") is None):
+                    break
+                if anchor is None or _pull_key(nxt) != anchor:
+                    break
+                j += 1
+            if j - 1 > i:
+                units[j - 1].setdefault("trailing", []).extend(trailing)
+                units[i]["trailing"] = []
+        i += 1
+
     # 4) renumber + collect deletes
     deletes: list[int] = []
     for ace in entries or []:
@@ -590,6 +640,10 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
         ace = u.get("ace")
         if ace is not None and ace.get("kind") in ("permit", "deny", "other"):
             lines.append(f"{n} {ace['text']}")
+            n += 10
+        for r in u.get("trailing", []):
+            stats["remarks"] += 1
+            lines.append(f"{n} remark {r}")
             n += 10
     stats["after"] = len(lines)
     return {"deletes": deletes, "lines": lines, "stats": stats}
