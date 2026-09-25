@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 import acl_parser
 import cisco_ssh
 import crypto_store
+import device_import
 import dhcp_check
 import track
 import updater
@@ -248,6 +249,93 @@ class DeviceDialog(tk.Toplevel):
         self.destroy()
 
 
+class ImportDialog(tk.Toplevel):
+    """Import-wide credentials: one username/password/enable applied to
+    every imported device (fills missing values, or overwrites all)."""
+
+    def __init__(self, parent, lang: str, fname: str, fmt: str, count: int):
+        super().__init__(parent)
+        S = STRINGS[lang]
+        self.title(S["import_title"])
+        self.resizable(False, False)
+        self.result: dict | None = None
+        self._is_mr = (fmt == "mremoteng")
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        n = str(count) if count >= 0 else S["import_found_unknown"]
+        fmt_name = S["import_fmt_mremoteng"] if self._is_mr else S["import_fmt_generic"]
+        ttk.Label(self, text=S["import_found"].format(file=fname, fmt=fmt_name, n=n),
+                  justify="left").grid(row=0, column=0, columnspan=2,
+                                       sticky="w", padx=12, pady=(12, 4))
+        ttk.Label(self, text=S["import_note"], wraplength=360, justify="left",
+                  foreground="gray").grid(row=1, column=0, columnspan=2,
+                                          sticky="w", padx=12, pady=(0, 6))
+
+        ttk.Label(self, text=S["fld_user"]).grid(row=2, column=0, sticky="w",
+                                                 padx=12, pady=(4, 2))
+        self.e_user = ttk.Entry(self, width=32)
+        self.e_user.grid(row=3, column=0, columnspan=2, padx=12)
+
+        ttk.Label(self, text=S["fld_pass"]).grid(row=4, column=0, sticky="w",
+                                                 padx=12, pady=(8, 2))
+        self.e_pass = ttk.Entry(self, show="*", width=26)
+        self.e_pass.grid(row=5, column=0, sticky="w", padx=12)
+        ttk.Button(self, text=S["show_pass"], width=8,
+                   command=lambda: self._toggle(self.e_pass)).grid(
+                       row=5, column=1, padx=(0, 12))
+
+        ttk.Label(self, text=S["fld_enable"]).grid(row=6, column=0, sticky="w",
+                                                   padx=12, pady=(8, 2))
+        self.e_enable = ttk.Entry(self, show="*", width=26)
+        self.e_enable.grid(row=7, column=0, sticky="w", padx=12)
+        ttk.Button(self, text=S["show_pass"], width=8,
+                   command=lambda: self._toggle(self.e_enable)).grid(
+                       row=7, column=1, padx=(0, 12))
+
+        next_row = 8
+        if self._is_mr:
+            ttk.Label(self, text=S["import_mrpass"]).grid(
+                row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 2))
+            self.e_master = ttk.Entry(self, show="*", width=26)
+            self.e_master.grid(row=9, column=0, sticky="w", padx=12)
+            ttk.Button(self, text=S["show_pass"], width=8,
+                       command=lambda: self._toggle(self.e_master)).grid(
+                           row=9, column=1, padx=(0, 12))
+            next_row = 10
+        else:
+            self.e_master = None
+
+        self.overwrite_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self, text=S["import_overwrite"],
+                        variable=self.overwrite_var).grid(
+                            row=next_row, column=0, columnspan=2,
+                            sticky="w", padx=12, pady=(10, 0))
+
+        fr = ttk.Frame(self)
+        fr.grid(row=next_row + 1, column=0, columnspan=2, pady=14)
+        ttk.Button(fr, text=S["ok_btn"], command=self._on_ok).pack(
+            side="left", padx=6)
+        ttk.Button(fr, text=S["cancel_btn"], command=self.destroy).pack(
+            side="left", padx=6)
+        self.transient(parent)
+        self.e_user.focus_set()
+
+    @staticmethod
+    def _toggle(entry: ttk.Entry):
+        entry.configure(show="" if entry.cget("show") == "*" else "*")
+
+    def _on_ok(self):
+        self.result = {
+            "username": self.e_user.get().strip(),
+            "password": self.e_pass.get(),
+            "enable": self.e_enable.get(),
+            "master": self.e_master.get() if self.e_master is not None else "",
+            "overwrite": bool(self.overwrite_var.get()),
+        }
+        self.destroy()
+
+
 class SubnetDialog(tk.Toplevel):
     def __init__(self, parent, lang: str, title: str, initial: dict | None = None):
         super().__init__(parent)
@@ -459,6 +547,8 @@ class App(tk.Tk):
         self.btn_del.pack(side="left", padx=6)
         self.btn_test = ttk.Button(dbtns, text="", command=self.test_device)
         self.btn_test.pack(side="left", padx=6)
+        self.btn_import = ttk.Button(dbtns, text="", command=self.import_devices)
+        self.btn_import.pack(side="left", padx=6)
 
         # --- Tab 3: subnets ---
         self.tab_sub = ttk.Frame(self.nb)
@@ -775,6 +865,9 @@ class App(tk.Tk):
                                 command=self.txt_vuln.xview)
         self.txt_vuln.configure(yscrollcommand=vuln_ys.set,
                                 xscrollcommand=vuln_xs.set)
+        self.txt_vuln.tag_configure("vuln_ok", foreground="green")
+        self.txt_vuln.tag_configure("vuln_fail", foreground="red")
+        self.txt_vuln.tag_configure("vuln_warn", foreground="dark orange")
         self.txt_vuln.grid(row=0, column=0, sticky="nsew")
         vuln_ys.grid(row=0, column=1, sticky="ns")
         vuln_xs.grid(row=1, column=0, sticky="ew")
@@ -894,6 +987,7 @@ class App(tk.Tk):
         self.btn_dup.configure(text=S["dup_btn"])
         self.btn_del.configure(text=S["del_btn"])
         self.btn_test.configure(text=S["test_btn"])
+        self.btn_import.configure(text=S["import_btn"])
         self.lbl_sub.configure(text=S["subnets_label"])
         self.lbl_sub_dev.configure(text=S["subnet_dev_label"])
         self.btn_sub_fetch.configure(text=S["subnet_fetch_btn"])
@@ -1538,6 +1632,21 @@ class App(tk.Tk):
         self.txt_vuln.see(tk.END)
         self.txt_vuln.configure(state="disabled")
 
+    def _insert_vuln_segments(self, segs: list[tuple[str, str | None]],
+                              clear: bool = False):
+        """Insert pre-tagged lines; tags: vuln_ok (green), vuln_fail (red),
+        vuln_warn (orange), None = default color."""
+        self.txt_vuln.configure(state="normal")
+        if clear:
+            self.txt_vuln.delete("1.0", tk.END)
+        for text, tag in segs:
+            if tag:
+                self.txt_vuln.insert(tk.END, text, tag)
+            else:
+                self.txt_vuln.insert(tk.END, text)
+        self.txt_vuln.see(tk.END)
+        self.txt_vuln.configure(state="disabled")
+
     def _set_vuln_prop(self, content: str):
         self.txt_vuln_prop.configure(state="normal")
         self.txt_vuln_prop.delete("1.0", tk.END)
@@ -1577,9 +1686,8 @@ class App(tk.Tk):
         self._vuln_stop.set()
 
     def _vuln_worker(self, devs: list[dict]):
-        for d in devs:
-            if self._vuln_stop.is_set():
-                break
+        """Check all selected switches in parallel (up to 5 SSH sessions)."""
+        def one_device(d: dict):
             host = d.get("host", "?")
             try:
                 out = cisco_ssh.run_commands(
@@ -1591,22 +1699,36 @@ class App(tk.Tk):
                     out.get(vuln_telnet.TELNET_COMMANDS[0], ""),
                     out.get(vuln_telnet.TELNET_COMMANDS[2], ""),
                     out.get(vuln_telnet.TELNET_COMMANDS[1], ""))
-                self.msg_queue.put(("vuln_chunk", (host, res, None)))
+                return (host, res, None)
             except Exception as e:
-                self.msg_queue.put(("vuln_chunk", (host, None, str(e))))
+                return (host, None, str(e))
+
+        # keep original order: submit in order, collect in order
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(5, len(devs))) as ex:
+            futs = [ex.submit(one_device, d) for d in devs]
+            for fut in futs:
+                if self._vuln_stop.is_set():
+                    for f in futs:
+                        f.cancel()
+                    break
+                try:
+                    payload = fut.result()
+                except Exception as e:
+                    payload = ("?", None, str(e))
+                self.msg_queue.put(("vuln_chunk", payload))
         self.msg_queue.put(("vuln_done", None))
 
     def _finish_vuln_chunk(self, host: str, res: dict | None, err: str | None):
         self.vuln_results.append((host, res, err))
         if err:
-            chunk = (self.T("device_hdr").format(host=host) + "\n"
-                     + self.T("vuln_fetch_fail").format(host=host, err=err) + "\n")
+            segs = [(self.T("device_hdr").format(host=host) + "\n", None),
+                    (self.T("vuln_fetch_fail").format(host=host, err=err)
+                     + "\n", "vuln_fail")]
         else:
-            chunk = self._format_vuln_result(host, res or {})
-        if not self.txt_vuln.get("1.0", tk.END).strip():
-            self._set_vuln_text(chunk.rstrip() + "\n")
-        else:
-            self._append_vuln_text(chunk.rstrip() + "\n")
+            segs = self._format_vuln_result(host, res or {})
+        empty = not self.txt_vuln.get("1.0", tk.END).strip()
+        self._insert_vuln_segments(segs, clear=empty)
         try:
             total = int(self.vuln_prog.cget("maximum") or 0)
             self.vuln_prog.configure(value=len(self.vuln_results))
@@ -1617,32 +1739,38 @@ class App(tk.Tk):
             pass
         self._rebuild_vuln_proposal()
 
-    def _format_vuln_result(self, host: str, res: dict) -> str:
-        lines = [self.T("device_hdr").format(host=host)]
+    def _format_vuln_result(self, host: str, res: dict
+                            ) -> list[tuple[str, str | None]]:
+        """Per-device findings as (line, tag) segments for colored display."""
+        segs = [(self.T("device_hdr").format(host=host) + "\n", None)]
         vty = res.get("vty", [])
         if not vty:
-            lines.append(self.T("vuln_no_vty"))
+            segs.append((self.T("vuln_no_vty") + "\n", "vuln_warn"))
         else:
             for e in vty:
                 val = e.get("transport") or "(missing)"
-                mark = "OK " if e.get("compliant") else "FAIL"
-                lines.append(f"[{mark}] {e.get('header')}: "
-                             f"transport input {val}")
+                if e.get("compliant"):
+                    mark, tag = "OK ", "vuln_ok"
+                else:
+                    mark, tag = "FAIL", "vuln_fail"
+                segs.append((f"[{mark}] {e.get('header')}: "
+                             f"transport input {val}\n", tag))
             for e in res.get("con_aux", []):
                 if e.get("status") == "vulnerable":
-                    lines.append(f"[WARN] {e.get('header')}: "
-                                 f"transport input {e.get('transport')}")
+                    segs.append((f"[WARN] {e.get('header')}: "
+                                 f"transport input {e.get('transport')}\n",
+                                 "vuln_warn"))
         if res.get("compliant"):
-            lines.append(self.T("vuln_ok"))
+            segs.append((self.T("vuln_ok") + "\n", "vuln_ok"))
         else:
-            lines.append(self.T("vuln_bad"))
+            segs.append((self.T("vuln_bad") + "\n", "vuln_fail"))
         if res.get("ssh_enabled") is False:
-            lines.append(self.T("vuln_warn_ssh"))
+            segs.append((self.T("vuln_warn_ssh") + "\n", "vuln_warn"))
         for e in vty:
             if e.get("status") == "blocked":
-                lines.append(self.T("vuln_warn_blocked").format(
-                    header=e.get("header")))
-        return "\n".join(lines) + "\n"
+                segs.append((self.T("vuln_warn_blocked").format(
+                    header=e.get("header")) + "\n", "vuln_warn"))
+        return segs
 
     def _rebuild_vuln_proposal(self):
         """Combined paste-ready fix, per-device sections as '! ' comments."""
@@ -1784,6 +1912,71 @@ class App(tk.Tk):
             self.msg_queue.put(("info", self.T("conn_ok").format(host=d["host"], n=len(acls))))
         except Exception as e:
             self.msg_queue.put(("info", self.T("conn_fail").format(host=d["host"], err=e)))
+
+    def import_devices(self):
+        """Import devices from mRemoteNG confCons.xml or a generic XML file.
+
+        One username/password/enable from the dialog covers the whole
+        import; hosts already on the list are skipped (never duplicated).
+        """
+        import os as _os
+
+        if not self._require_unlocked():
+            return
+        path = filedialog.askopenfilename(
+            title=self.T("import_file_title"),
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                text = f.read()
+        except Exception as e:
+            messagebox.showerror("ACL", self.T("import_bad").format(err=e))
+            return
+        try:
+            fmt = device_import.detect_format(text)
+        except ValueError as e:
+            messagebox.showerror("ACL", self.T("import_bad").format(err=e))
+            return
+        try:
+            # full-file-encrypted mRemoteNG with a custom password cannot be
+            # counted yet (the password comes from the dialog) -> show "?"
+            count = device_import.count_entries(text, fmt)
+        except ValueError:
+            count = -1
+        dlg = ImportDialog(self, self.lang, _os.path.basename(path), fmt,
+                           count)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        cred = dlg.result
+        try:
+            if fmt == "mremoteng":
+                imported, info = device_import.parse_mremoteng(
+                    text, cred["master"])
+            else:
+                imported, info = device_import.parse_generic(text)
+        except ValueError as e:
+            messagebox.showerror("ACL", self.T("import_bad").format(err=e))
+            return
+        merged = device_import.merge_devices(
+            self.devices, imported, cred["username"], cred["password"],
+            cred["enable"], cred["overwrite"])
+        self.devices = merged["devices"]
+        self.persist_store()
+        self.refresh_tree()
+        msg = self.T("import_summary").format(
+            added=merged["added"], dup=merged["duplicates"],
+            inv=merged["invalid"] + info.get("invalid", 0),
+            nssh=info.get("skipped_non_ssh", 0),
+            dec=info.get("decrypted", 0), frm=merged["from_form"])
+        if merged["dup_hosts"]:
+            shown = ", ".join(merged["dup_hosts"][:8])
+            if merged["duplicates"] > 8:
+                shown += ", ..."
+            msg += "\n" + self.T("import_dups").format(hosts=shown)
+        messagebox.showinfo("ACL", msg)
 
     def change_master(self):
         if not self._require_unlocked():

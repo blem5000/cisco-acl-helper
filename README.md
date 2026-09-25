@@ -13,6 +13,15 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   przechowywana **szyfrowana** (Fernet, klucz z hasła głównego przez PBKDF2-SHA256).
   Przycisk **Duplikuj** kopiuje poświadczenia z wybranego urządzenia
   (do wypełnienia zostaje tylko nowe IP i nazwa).
+  Przycisk **Importuj** wczytuje urządzenia z pliku XML z auto-wykrywaniem
+  formatu: **mRemoteNG** (`confCons.xml`, tylko połączenia SSH1/SSH2, hasła
+  odszyfrowywane AES-GCM/AES-CBC kluczem domyślnym `mR3m` lub podanym
+  hasłem głównym) albo **generyczny XML** (`<devices><device host="…"
+  hostname="…" username="…" password="…" port="…" enable="…"/>` lub
+  `<device><host>…</host>…</device>`, ewentualnie sama lista `<host>`).
+  Jeden login/hasło/enable z dialogu pokrywa cały import (uzupełnia braki,
+  opcjonalnie nadpisuje wszystko), a IP już będące na liście są pomijane
+  (nigdy nie duplikowane).
 - **Podsieci** — mapowanie `podsieć (CIDR) → ACL-IN / ACL-OUT` (osobne listy
   dla kierunków in/out).
 - **Generator ACL** — dla jednego komputera i wielu kamer generuje gotowy
