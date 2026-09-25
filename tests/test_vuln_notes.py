@@ -21,6 +21,7 @@ def ssh_res(**over):
     subs.update(over.get("subs", {}))
     return {"vuln": "ssh",
             "ios": over.get("ios", ""),
+            "model": over.get("model", ""),
             "capability": over.get("capability", {}),
             "subs": subs}
 
@@ -42,7 +43,7 @@ class SshNoteTest(unittest.TestCase):
         self.assertIn("15.2(2)E7", note)
         self.assertIn("diffie-hellman-group1-sha1", note)
         self.assertIn("algorithm kex", note)
-        self.assertIn("OpenProject", note)
+        self.assertIn("risk acceptance", note)
 
     def test_empty_kept_branch(self):
         subs = dict(OK_SUBS)
@@ -64,6 +65,36 @@ class SshNoteTest(unittest.TestCase):
         self.assertEqual(
             vuln_ssh.openproject_note("h", ssh_res(), self.T), "")
 
+    def test_2960x_upgrade_warning(self):
+        subs = dict(OK_SUBS)
+        subs["kex"] = {"status": "fail", "appliable": False,
+                       "found": ["diffie-hellman-group1-sha1"],
+                       "kept": ["diffie-hellman-group14-sha1"]}
+        note = vuln_ssh.openproject_note(
+            "10.0.0.5",
+            ssh_res(subs=subs, model="WS-C2960X-48FPD-L",
+                    capability={"keywords": ["encryption", "mac"]}), self.T)
+        self.assertIn("WS-C2960X-48FPD-L", note)
+        self.assertIn("ILET-1-AUTHENTICATION_FAIL", note)
+        self.assertIn("diffie-hellman-group1-sha1", note)
+
+    def test_no_2960x_no_warning(self):
+        subs = dict(OK_SUBS)
+        subs["kex"] = {"status": "fail", "appliable": False,
+                       "found": ["diffie-hellman-group1-sha1"],
+                       "kept": ["diffie-hellman-group14-sha1"]}
+        note = vuln_ssh.openproject_note(
+            "10.0.0.6",
+            ssh_res(subs=subs, model="WS-C3560X-48P",
+                    capability={"keywords": ["encryption", "mac"]}), self.T)
+        self.assertNotIn("ILET-1-AUTHENTICATION_FAIL", note)
+        self.assertIn("diffie-hellman-group1-sha1", note)
+
+    def test_2960x_fixable_no_note_at_all(self):
+        note = vuln_ssh.openproject_note(
+            "10.0.0.7", ssh_res(model="WS-C2960X-48FPD-L"), self.T)
+        self.assertEqual(note, "")
+
     def test_polish_note(self):
         Tpl = lambda k: STRINGS["pl"].get(k, k)  # noqa: E731
         subs = dict(OK_SUBS)
@@ -73,7 +104,7 @@ class SshNoteTest(unittest.TestCase):
         note = vuln_ssh.openproject_note(
             "10.0.0.1", ssh_res(subs=subs), Tpl)
         self.assertIn("automatyczna poprawka niewdrożona", note)
-        self.assertIn("OpenProject", note)
+        self.assertIn("akceptacja ryzyka", note)
 
 
 class TelnetNoteTest(unittest.TestCase):
@@ -99,6 +130,15 @@ class TelnetNoteTest(unittest.TestCase):
             "h", {"vuln": "telnet",
                   "vty": [{"header": "line vty 0 4", "status": "ok",
                            "compliant": True}]}, self.T), "")
+
+
+class NoteDialogKeysTest(unittest.TestCase):
+    def test_dialog_keys_in_both_languages(self):
+        for lang in ("en", "pl"):
+            for key in ("vuln_note_btn", "vuln_note_title",
+                        "vuln_note_copy", "vuln_note_close"):
+                self.assertIn(key, STRINGS[lang])
+                self.assertTrue(STRINGS[lang][key].strip())
 
 
 class CollectNotesTest(unittest.TestCase):

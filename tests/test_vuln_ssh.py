@@ -229,6 +229,7 @@ class VersionMatrixTest(unittest.TestCase):
         self.assertTrue(r["subs"]["mac"]["appliable"])
         self.assertTrue(r["subs"]["cbc"]["appliable"])
         self.assertTrue(r["subs"]["kex"]["appliable"])  # attempt reveals
+        self.assertIn("2960X", r["model"])
 
     def test_ios122_no_algorithm_lines(self):
         r = s.analyze_ssh(WEAK, "", "", IOS122)

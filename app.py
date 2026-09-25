@@ -2043,10 +2043,17 @@ class App(tk.Tk):
             return
         dlg = tk.Toplevel(self)
         dlg.title(self.T("vuln_note_title"))
-        dlg.geometry("640x380")
+        dlg.geometry("640x440")
+        dlg.minsize(480, 320)
         dlg.transient(self)
-        txt = tk.Text(dlg, wrap="word", font=("Consolas", 10))
-        txt.pack(fill="both", expand=True, padx=10, pady=(10, 6))
+        txt_fr = ttk.Frame(dlg)
+        txt_fr.pack(fill="both", expand=True, padx=10, pady=(10, 6))
+        txt = tk.Text(txt_fr, wrap="word", font=("Consolas", 10),
+                      height=12, width=70)
+        ys = ttk.Scrollbar(txt_fr, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ys.set)
+        txt.pack(side="left", fill="both", expand=True)
+        ys.pack(side="right", fill="y")
         txt.insert("1.0", text)
         txt.configure(state="disabled")
         fr = ttk.Frame(dlg)
@@ -2057,9 +2064,9 @@ class App(tk.Tk):
             self.clipboard_append(text)
             self._toast(self.T("copied"))
 
-        ttk.Button(fr, text=self.T("copy_btn"), command=_copy).pack(
+        ttk.Button(fr, text=self.T("vuln_note_copy"), command=_copy).pack(
             side="left", padx=(0, 6))
-        ttk.Button(fr, text=self.T("cancel_btn"),
+        ttk.Button(fr, text=self.T("vuln_note_close"),
                    command=dlg.destroy).pack(side="left", padx=6)
 
     # ---------- vulnerabilities: apply the fix (one open session per device)

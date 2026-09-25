@@ -95,6 +95,13 @@ def _ios_short(version_out: str) -> str:
     return re.sub(r"\s+", " ", m.group(0).strip()) if m else ""
 
 
+def _parse_model(version_out: str) -> str:
+    """Switch model token for reports (e.g. 'WS-C2960X-48FPD-L', else '')."""
+    m = re.search(r"(WS-C2960X\S*|C2960X\S*)", version_out or "",
+                  re.IGNORECASE)
+    return m.group(1).upper() if m else ""
+
+
 def _parse_algo_help(help_out: str) -> set[str]:
     """Keywords from `ip ssh server algorithm ?` (empty when unsupported)."""
     found: set[str] = set()
@@ -293,6 +300,7 @@ def analyze_ssh(scan: dict, show_ip_ssh: str = "",
                  "strict_kex": strict},
         "capability": cap,
         "ios": _ios_short(version_out),
+        "model": _parse_model(version_out),
         "orig_algo": cfg["algo"],
         "orig_version": cfg["version"],
         "show_algos": show_algos,
@@ -555,5 +563,7 @@ def openproject_note(host: str, result: dict, T) -> str:
             why = T("ssh_note_unsupported")
         lines.append(T("ssh_note_item").format(sub=T("ssh_sub_" + sub),
                                                algos=algos, why=why))
+    if "2960X" in result.get("model", ""):
+        lines.append(T("ssh_note_2960x").format(model=result["model"]))
     lines.append(T("ssh_note_footer"))
     return "\n".join(lines)
