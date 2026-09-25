@@ -294,3 +294,122 @@ def run_commands(host: str, username: str, password: str,
         return res
     finally:
         client.close()
+
+
+_CONFIG_ERROR = re.compile(r"^%|command rejected", re.M | re.IGNORECASE)
+
+
+class ConfigFailed(RuntimeError):
+    """Some `configure terminal` sub-commands were rejected by IOS."""
+
+    def __init__(self, failures: list[tuple[str, str]]):
+        self.failures = failures
+        detail = "; ".join(f"{c!r}: {o.splitlines()[0] if o.splitlines() else '?'}"
+                           for c, o in failures)
+        super().__init__(f"IOS rejected {len(failures)} command(s): {detail}")
+
+
+class ConfigSession:
+    """One persistent privileged shell for check -> fix -> verify -> wr/rollback.
+
+    The session stays open across the whole operation (including while the
+    operator verifies the device in a separate window), so a bad change can
+    always be rolled back. Use as a context manager or open()/close().
+    """
+
+    def __init__(self, host: str, username: str, password: str,
+                 enable: str | None = None, port: int = 22,
+                 timeout: int = 15, debug_log: str | None = None):
+        self.host = host
+        self.username = username
+        self.password = password
+        self.enable = enable
+        self.port = port
+        self.timeout = timeout
+        self.debug_log = debug_log
+        self._t = None
+        self._chan = None
+
+    def __enter__(self) -> "ConfigSession":
+        self.open()
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+        return False
+
+    def open(self) -> None:
+        if self.debug_log:
+            try:
+                paramiko.util.log_to_file(self.debug_log, level="DEBUG")
+            except Exception:
+                pass
+        _enable_legacy_cisco_algos()
+        self._t = _connect_with_retry(self.host, self.username, self.password,
+                                      self.port, self.timeout, self.debug_log)
+        try:
+            self._chan = _open_shell(self._t, self.enable)
+        except Exception:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        try:
+            if self._chan is not None:
+                self._chan.close()
+        except Exception:
+            pass
+        finally:
+            self._chan = None
+        try:
+            if self._t is not None:
+                self._t.close()
+        except Exception:
+            pass
+        finally:
+            self._t = None
+
+    def alive(self) -> bool:
+        try:
+            return (self._t is not None and self._chan is not None
+                    and self._t.is_active() and not self._chan.closed)
+        except Exception:
+            return False
+
+    def exec(self, command: str, wait: float = 2.5) -> str:
+        """Run one command, return output without echo/prompt lines."""
+        if self._chan is None:
+            raise RuntimeError(f"{self.host}: session is not open")
+        return _clean_output(_shell_exec(self._chan, command, wait), command)
+
+    def ensure_privileged(self) -> None:
+        """Raise unless the shell sits at a '#' (enable) prompt."""
+        out = self.exec("", 1.2)
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        if not lines or not re.search(r"#\s*$", lines[-1]):
+            raise RuntimeError(
+                f"{self.host}: privileged (enable) mode not reached - "
+                f"check the enable secret.")
+
+    def configure(self, commands: list | tuple) -> None:
+        """Push config sub-commands via `configure terminal` ... `end`.
+
+        Raises ConfigFailed listing every rejected command (the session is
+        always brought back to privileged exec first).
+        """
+        out = self.exec("configure terminal", 2.0)
+        if _CONFIG_ERROR.search(out):
+            raise ConfigFailed([("configure terminal", out.strip())])
+        failures: list[tuple[str, str]] = []
+        try:
+            for cmd in commands:
+                o = self.exec(cmd, 2.0)
+                if _CONFIG_ERROR.search(o):
+                    failures.append((cmd, o.strip()))
+        finally:
+            try:
+                self.exec("end", 1.5)
+            except Exception:
+                pass
+        if failures:
+            raise ConfigFailed(failures)

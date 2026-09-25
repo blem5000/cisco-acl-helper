@@ -35,6 +35,16 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada
   po IP lub nazwie hosta, opcjonalnie logowanie poświadczeniami urządzenia
   nadrzędnego).
+- **Podatności** — sprawdzanie podatności (na początek nieszyfrowany Telnet:
+  każda `line vty` musi mieć `transport input ssh`) na urządzeniach
+  zaznaczonych ✓ w zakładce Urządzenia, równolegle do 5 hostów, wyniki
+  kolorowane (czerwone/zielone). Przycisk **Zastosuj poprawkę** pracuje
+  bezpiecznie na jednej otwartej sesji: świeże sprawdzenie i pre-flight
+  (świeże logowanie SSH) → konfiguracja → weryfikacja w running-config
+  i automatyczny test nowej sesji SSH (przy odmowie natychmiastowy
+  rollback bez pytania) → Twoje potwierdzenie (nowa sesja SSH do
+  testu) → dopiero wtedy `write memory`, w razie odmowy rollback
+  z weryfikacją.
 - **Ustawienia** — język, adres serwera DHCP, zmiana hasła głównego,
   opcjonalny log debugowania SSH (`ssh_debug.log`).
 

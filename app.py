@@ -8,8 +8,10 @@ import json
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -420,6 +422,7 @@ class App(tk.Tk):
         self.vuln_results: list[tuple] = []  # (host, result_dict|None, err|None)
         self.vuln_proposal = ""
         self._vuln_stop = threading.Event()
+        self._vuln_applying = False
         self._vlan_fetching = False
         self.last_results: list[tuple] = []  # (host, found_dict, err|None)
         self._dev_sort: tuple | None = None  # (column, reverse)
@@ -852,7 +855,8 @@ class App(tk.Tk):
         self.btn_vuln_copy.pack(side="left", padx=6)
         self.btn_vuln_clear = ttk.Button(vbtns, text="", command=self.clear_vuln)
         self.btn_vuln_clear.pack(side="left", padx=6)
-        self.btn_vuln_apply = ttk.Button(vbtns, text="", state="disabled")
+        self.btn_vuln_apply = ttk.Button(vbtns, text="",
+                                          command=self.start_vuln_apply)
         self.btn_vuln_apply.pack(side="left", padx=6)
         self.btn_vuln_all = ttk.Button(vbtns, text="",
                                        command=lambda: self.vuln_listbox.select_set(0, tk.END))
@@ -1441,6 +1445,21 @@ class App(tk.Tk):
                                     {"devices": self.devices,
                                      "subnets": self.subnets}, self.master_pw)
 
+    def _backup_store(self) -> str | None:
+        """Timestamped copy of devices.enc before a bulk rewrite (import).
+
+        Returns the backup path, or None when there is nothing to back up
+        (first run) or the copy failed (import still proceeds).
+        """
+        if not self.master_pw or not os.path.exists(DEVICES_FILE):
+            return None
+        dst = DEVICES_FILE + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+        try:
+            shutil.copy2(DEVICES_FILE, dst)
+            return dst
+        except OSError:
+            return None
+
     @staticmethod
     def _host_key(host: str) -> tuple:
         """Sort key: real IPs numerically (10.0.0.9 < 10.0.0.10), then names."""
@@ -1783,11 +1802,15 @@ class App(tk.Tk):
         self.txt_vuln_prop.configure(state="disabled")
 
     def start_vuln_check(self):
-        if self._vuln_fetching:
+        if self._vuln_fetching or self._vuln_applying:
             return
         if not self._require_unlocked():
             return
         devs = self._selected_vuln_devices()
+        if not devs:
+            # empty list -> fall back to devices marked on the Devices tab
+            self.vuln_select_marked()
+            devs = self._selected_vuln_devices()
         if not devs:
             messagebox.showwarning("ACL", self.T("vuln_need_dev"))
             return
@@ -1804,6 +1827,7 @@ class App(tk.Tk):
         self._vuln_fetching = True
         self._vuln_stop.clear()
         self.btn_vuln_check.configure(state="disabled")
+        self.btn_vuln_apply.configure(state="disabled")
         self.btn_vuln_stop.configure(state="normal")
         self.vuln_prog.configure(maximum=len(devs), value=0,
                                    mode="indeterminate",
@@ -1933,6 +1957,7 @@ class App(tk.Tk):
         self._vuln_fetching = False
         try:
             self.btn_vuln_check.configure(state="normal")
+            self.btn_vuln_apply.configure(state="normal")
             self.btn_vuln_stop.configure(state="disabled")
             self.vuln_prog.stop()
             total = int(self.vuln_prog.cget("maximum") or 0)
@@ -1977,6 +2002,250 @@ class App(tk.Tk):
                                      style="Horizontal.TProgressbar", value=0)
         except tk.TclError:
             pass
+
+    # ---------- vulnerabilities: apply the fix (one open session per device)
+    def start_vuln_apply(self):
+        """Apply proposals with a safe protocol per device: fresh re-check
+        -> configure -> verify in running-config -> operator confirmation
+        (session held open) -> write memory, else rollback."""
+        if self._vuln_fetching or self._vuln_applying:
+            return
+        if not self._require_unlocked():
+            return
+        cands = [(h, r) for h, r, e in self.vuln_results
+                 if not e and r and vuln_telnet.needs_apply(r)]
+        if not cands:
+            messagebox.showinfo("ACL", self.T("vuln_apply_none"))
+            return
+        hosts = [h for h, _r in cands]
+        shown = ", ".join(hosts[:10]) + (", ..." if len(hosts) > 10 else "")
+        if not messagebox.askyesno(
+                "ACL", self.T("vuln_apply_overview").format(n=len(hosts),
+                                                            hosts=shown)):
+            return
+        devs = []
+        for h in hosts:
+            d = self._lookup_device(h)
+            if d is not None:
+                devs.append(d)
+        if not devs:
+            return
+        self._vuln_applying = True
+        self._vuln_stop.clear()
+        self.btn_vuln_check.configure(state="disabled")
+        self.btn_vuln_apply.configure(state="disabled")
+        self.btn_vuln_stop.configure(state="normal")
+        self.vuln_prog.configure(mode="indeterminate",
+                                 style="VulnWork.Horizontal.TProgressbar")
+        self.vuln_prog.start(12)
+        self.status.set(self.T("vuln_apply_status").format(n=len(devs)))
+        threading.Thread(target=self._apply_worker, args=(devs,),
+                         daemon=True).start()
+
+    @staticmethod
+    def _analyze_session(sess) -> dict:
+        out = {cmd: sess.exec(cmd, 2.5) for cmd in vuln_telnet.TELNET_COMMANDS}
+        return vuln_telnet.analyze_telnet(
+            out[vuln_telnet.TELNET_COMMANDS[0]],
+            out[vuln_telnet.TELNET_COMMANDS[2]],
+            out[vuln_telnet.TELNET_COMMANDS[1]])
+
+    def _try_rollback(self, sess, changed: list[dict]) -> bool:
+        """Restore original transports; True only if verified in config."""
+        if not changed or not sess.alive():
+            return False
+        try:
+            sess.configure(vuln_telnet.build_rollback_commands(changed))
+            res = self._analyze_session(sess)
+        except Exception:
+            return False
+        want = {(e.get("range") or ""): (e.get("transport") or "")
+                for e in changed}
+        got = {(e.get("range") or ""): (e.get("transport") or "")
+               for e in res.get("vty", [])}
+        return bool(want) and all(got.get(r) == t for r, t in want.items())
+
+    def _put_apply(self, lines: list[tuple[str, str | None]]):
+        self.msg_queue.put(("vuln_apply_chunk", lines))
+
+    def _apply_worker(self, devs: list[dict]):
+        ok = rb = fail = skip = 0
+        for d in devs:
+            if self._vuln_stop.is_set():
+                self._put_apply([(self.T("vuln_apply_stopped") + "\n",
+                                  "vuln_warn")])
+                break
+            host = d.get("host", "?")
+            hdr = [(self.T("device_hdr").format(host=host) + "\n", None)]
+            sess = cisco_ssh.ConfigSession(
+                host, d["username"], d.get("password", ""),
+                d.get("enable") or None, int(d.get("port", 22)),
+                debug_log=self._ssh_debug_log())
+            changed: list[dict] = []
+            try:
+                self._put_apply(
+                    hdr + [(self.T("vuln_st_recheck").format(host=host)
+                            + "\n", None)])
+                sess.open()
+                sess.ensure_privileged()
+                res = self._analyze_session(sess)
+                if res.get("compliant"):
+                    self._put_apply([(self.T("vuln_apply_already") + "\n",
+                                      "vuln_ok")])
+                    skip += 1
+                    continue
+                if res.get("ssh_enabled") is False:
+                    self._put_apply([(self.T("vuln_apply_nossh") + "\n",
+                                      "vuln_warn")])
+                    skip += 1
+                    continue
+                targets = vuln_telnet.apply_targets(res)
+                if not targets:
+                    self._put_apply([(self.T("vuln_apply_manual") + "\n",
+                                      "vuln_warn")])
+                    skip += 1
+                    continue
+                changed = [dict(e) for e in targets]
+                # Pre-flight: a FRESH login must work before we touch
+                # transport (the main session alone does not prove that a
+                # new login with these credentials succeeds right now).
+                self._put_apply(
+                    [(self.T("vuln_st_preflight").format(host=host) + "\n",
+                      None)])
+                try:
+                    cisco_ssh.run_commands(
+                        host, d["username"], d.get("password", ""),
+                        d.get("enable") or None, int(d.get("port", 22)),
+                        timeout=15, commands=["show clock"],
+                        debug_log=self._ssh_debug_log())
+                except Exception as e:
+                    self._put_apply(
+                        [(self.T("vuln_preflight_fail").format(err=e) + "\n",
+                          "vuln_fail")])
+                    skip += 1
+                    continue
+                self._put_apply([(self.T("vuln_preflight_ok") + "\n",
+                                  "vuln_ok")])
+                self._put_apply(
+                    [(self.T("vuln_st_applying").format(host=host) + "\n",
+                      None)])
+                sess.configure(vuln_telnet.build_fix_commands(targets))
+                res2 = self._analyze_session(sess)
+                if not res2.get("compliant"):
+                    detail = (self.T("vuln_rb_ok") if self._try_rollback(
+                        sess, changed) else self.T("vuln_rb_bad"))
+                    self._put_apply(
+                        [(self.T("vuln_apply_postfail").format(detail=detail)
+                          + "\n", "vuln_fail")])
+                    fail += 1
+                    continue
+                # Fix is in running-config (NOT saved). First OUR OWN test:
+                # a brand-new SSH login must work, or the change is rolled
+                # back immediately without bothering the operator.
+                self._put_apply(
+                    [(self.T("vuln_st_posttest").format(host=host) + "\n",
+                      None)])
+                try:
+                    cisco_ssh.run_commands(
+                        host, d["username"], d.get("password", ""),
+                        d.get("enable") or None, int(d.get("port", 22)),
+                        timeout=15, commands=["show clock"],
+                        debug_log=self._ssh_debug_log())
+                except Exception as e:
+                    detail = (self.T("vuln_rb_ok") if self._try_rollback(
+                        sess, changed) else self.T("vuln_rb_bad"))
+                    self._put_apply(
+                        [(self.T("vuln_posttest_fail").format(
+                            err=e, detail=detail) + "\n", "vuln_fail")])
+                    fail += 1
+                    continue
+                self._put_apply([(self.T("vuln_posttest_ok") + "\n",
+                                  "vuln_ok")])
+                # New logins proven working. Ask the operator to verify from
+                # a NEW session; hold this one open meanwhile.
+                box: dict = {}
+                ev = threading.Event()
+                self.msg_queue.put((
+                    "vuln_apply_confirm",
+                    (host, self.T("vuln_verify_msg").format(host=host),
+                     box, ev)))
+                alive = True
+                while not ev.is_set():
+                    if self._vuln_stop.is_set():
+                        box["ok"] = False
+                        ev.set()
+                        break
+                    if not sess.alive():
+                        alive = False
+                        break
+                    try:
+                        sess.exec("", 1.0)
+                    except Exception:
+                        alive = False
+                        break
+                    ev.wait(30)
+                if not alive:
+                    self._put_apply(
+                        [(self.T("vuln_apply_sesslost").format(host=host)
+                          + "\n", "vuln_fail")])
+                    fail += 1
+                    continue
+                if box.get("ok"):
+                    wout = sess.exec("write memory", 8.0)
+                    if re.search(r"^%|command rejected", wout,
+                                 re.M | re.IGNORECASE):
+                        raise RuntimeError(f"write memory failed: {wout}")
+                    last = [ln for ln in wout.splitlines() if ln.strip()]
+                    self._put_apply(
+                        [(self.T("vuln_apply_saved").format(
+                            line=last[-1] if last else "OK") + "\n",
+                          "vuln_ok")])
+                    ok += 1
+                else:
+                    detail = (self.T("vuln_rb_ok") if self._try_rollback(
+                        sess, changed) else self.T("vuln_rb_bad"))
+                    tag = ("vuln_warn" if detail == self.T("vuln_rb_ok")
+                           else "vuln_fail")
+                    self._put_apply(
+                        [(self.T("vuln_apply_rb_user").format(detail=detail)
+                          + "\n", tag)])
+                    rb += 1
+            except cisco_ssh.ConfigFailed as e:
+                detail = (self.T("vuln_rb_ok") if self._try_rollback(
+                    sess, changed) else self.T("vuln_rb_bad"))
+                self._put_apply(
+                    [(self.T("vuln_apply_error").format(err=e) + "\n",
+                      "vuln_fail"),
+                     (self.T("vuln_apply_postfail").format(detail=detail)
+                      + "\n", "vuln_fail")])
+                fail += 1
+            except Exception as e:
+                if changed:
+                    self._try_rollback(sess, changed)
+                self._put_apply([(self.T("vuln_apply_error").format(err=e)
+                                  + "\n", "vuln_fail")])
+                fail += 1
+            finally:
+                sess.close()
+        self.msg_queue.put(("vuln_apply_done",
+                            {"ok": ok, "rb": rb, "fail": fail,
+                             "skip": skip}))
+
+    def _finish_apply_done(self, stats: dict):
+        self._vuln_applying = False
+        try:
+            self.btn_vuln_check.configure(state="normal")
+            self.btn_vuln_apply.configure(state="normal")
+            self.btn_vuln_stop.configure(state="disabled")
+            self.vuln_prog.stop()
+            self.vuln_prog.configure(mode="determinate",
+                                     style="VulnDone.Horizontal.TProgressbar",
+                                     value=self.vuln_prog.cget("maximum"))
+        except tk.TclError:
+            pass
+        self.status.set(self.T("vuln_apply_done").format(
+            ok=stats.get("ok", 0), rb=stats.get("rb", 0),
+            fail=stats.get("fail", 0), skip=stats.get("skip", 0)))
 
     def _toggle_audit_at(self, idx: int):
         """Flip the audit flag of one device (devices-tab checkbox column)."""
@@ -2165,6 +2434,7 @@ class App(tk.Tk):
         except ValueError as e:
             messagebox.showerror("ACL", self.T("import_bad").format(err=e))
             return
+        backup = self._backup_store()
         merged = device_import.merge_devices(
             self.devices, imported, cred["username"], cred["password"],
             cred["enable"], cred["overwrite"])
@@ -2176,6 +2446,8 @@ class App(tk.Tk):
             inv=merged["invalid"] + info.get("invalid", 0),
             nssh=info.get("skipped_non_ssh", 0),
             dec=info.get("decrypted", 0), frm=merged["from_form"])
+        if backup:
+            msg += "\n" + self.T("import_backup").format(path=backup)
         if merged["dup_hosts"]:
             shown = ", ".join(merged["dup_hosts"][:8])
             if merged["duplicates"] > 8:
@@ -3055,6 +3327,24 @@ class App(tk.Tk):
                     self._finish_vuln_chunk(host, res, err)
                 elif kind == "vuln_done":
                     self._finish_vuln_done()
+                elif kind == "vuln_apply_chunk":
+                    segs = payload
+                    if not self.txt_vuln.get("1.0", tk.END).strip():
+                        self._insert_vuln_segments(segs, clear=True)
+                    else:
+                        self._insert_vuln_segments(segs, clear=False)
+                elif kind == "vuln_apply_confirm":
+                    host, text, box, ev = payload
+                    try:
+                        ok = messagebox.askyesno(
+                            self.T("vuln_verify_title").format(host=host),
+                            text)
+                    except tk.TclError:
+                        ok = False
+                    box["ok"] = bool(ok)
+                    ev.set()
+                elif kind == "vuln_apply_done":
+                    self._finish_apply_done(payload)
                 elif kind == "gen_done":
                     (pc, host, grouped, do_in, do_out, fetch_key, taken, err,
                      dhcp_status, dhcp_detail, owner, aces, group) = payload

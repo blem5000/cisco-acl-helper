@@ -45,6 +45,10 @@ __all__ = [
     "TELNET_COMMANDS",
     "analyze_telnet",
     "build_proposal_script",
+    "apply_targets",
+    "needs_apply",
+    "build_fix_commands",
+    "build_rollback_commands",
 ]
 
 VULN_ID = "telnet"
@@ -205,13 +209,7 @@ def analyze_telnet(line_section: str = "",
 def build_proposal_script(vuln_vty: list[dict],
                           include_blocked: bool = False) -> list[str]:
     """Build a paste-ready CLI fix for non-compliant vty ranges."""
-    ranges: list[str] = []
-    for e in vuln_vty or []:
-        if e.get("status") == "blocked" and not include_blocked:
-            continue
-        rng = (e.get("range") or "").strip()
-        if rng and rng not in ranges:
-            ranges.append(rng)
+    ranges = _unique_ranges(vuln_vty, include_blocked)
     if not ranges:
         return []
     cmds = ["conf t"]
@@ -220,4 +218,58 @@ def build_proposal_script(vuln_vty: list[dict],
         cmds.append(" transport input ssh")
     cmds.append("end")
     cmds.append("wr")
+    return cmds
+
+
+def _unique_ranges(vuln_vty: list[dict], include_blocked: bool) -> list[str]:
+    ranges: list[str] = []
+    for e in vuln_vty or []:
+        if e.get("status") == "blocked" and not include_blocked:
+            continue
+        rng = (e.get("range") or "").strip()
+        if rng and rng not in ranges:
+            ranges.append(rng)
+    return ranges
+
+
+def apply_targets(result: dict) -> list[dict]:
+    """Vty entries the automatic fix will touch (non-compliant, not blocked)."""
+    return [e for e in (result or {}).get("vty", [])
+            if not e.get("compliant") and e.get("status") != "blocked"]
+
+
+def needs_apply(result: dict | None) -> bool:
+    """True when a device has an auto-appliable Telnet fix.
+
+    Refuses when SSH itself looks disabled (applying ssh-only transport
+    then would lock out remote access).
+    """
+    if not result or result.get("compliant"):
+        return False
+    if result.get("ssh_enabled") is False:
+        return False
+    return bool(apply_targets(result))
+
+
+def build_fix_commands(targets: list[dict]) -> list[str]:
+    """Raw sub-commands for a config session (no conf t / end / wr)."""
+    cmds: list[str] = []
+    for rng in _unique_ranges(targets, include_blocked=False):
+        cmds.append(f"line vty {rng}")
+        cmds.append("transport input ssh")
+    return cmds
+
+
+def build_rollback_commands(targets: list[dict]) -> list[str]:
+    """Restore the ORIGINAL transport inputs captured before the fix."""
+    cmds: list[str] = []
+    seen: set[str] = set()
+    for e in targets or []:
+        rng = (e.get("range") or "").strip()
+        if not rng or rng in seen:
+            continue
+        seen.add(rng)
+        cmds.append(f"line vty {rng}")
+        orig = (e.get("transport") or "").strip()
+        cmds.append(f"transport input {orig}" if orig else "no transport input")
     return cmds
