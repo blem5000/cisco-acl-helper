@@ -36,10 +36,12 @@ __all__ = [
     "build_rollback_commands",
     "fix_verified",
     "rollback_verified",
+    "split_fix_groups",
     "fetch_check_run",
     "fetch_check_session",
     "format_result",
     "verify_prompt",
+    "residual_summary",
 ]
 
 VULN_ID = "ssh"
@@ -48,7 +50,14 @@ CHECK_COMMANDS = [
     "show ip ssh",
     "show running-config | include ^ip ssh",
     "show version | include Cisco IOS|Version",
+    # Capability probe: asking the CLI itself which `algorithm` keywords
+    # exist. Entering config mode for `?` changes nothing (help text only).
+    "configure terminal",
+    "ip ssh server algorithm ?",
+    "end",
 ]
+
+ALGO_KEYWORDS = ("encryption", "mac", "kex", "hostkey")
 
 SUBS = ("mac", "kex", "cbc", "terrapin", "sshv1")
 
@@ -76,6 +85,17 @@ def _is_cbc(name: str) -> bool:
 
 def _is_etm(name: str) -> bool:
     return "etm" in name.lower()
+
+
+def _parse_algo_help(help_out: str) -> set[str]:
+    """Keywords from `ip ssh server algorithm ?` (empty when unsupported)."""
+    found: set[str] = set()
+    for line in (help_out or "").splitlines():
+        m = re.match(r"\s*(encryption|mac|kex|hostkey)\b", line,
+                     re.IGNORECASE)
+        if m:
+            found.add(m.group(1).lower())
+    return found
 
 
 def _parse_algo_config(include_out: str) -> dict:
@@ -110,19 +130,44 @@ def _parse_version(version_out: str) -> dict:
     return {"flavor": "unknown", "major": 0, "minor": 0}
 
 
-def _capability(show_algos: dict, orig_algo: dict, ver: dict) -> dict:
-    """Can this switch take `ip ssh server algorithm ...` lines?"""
+def _capability(show_algos: dict, orig_algo: dict, ver: dict,
+                keywords: set[str]) -> dict:
+    """Can this switch take `ip ssh server algorithm ...` lines, per kind?
+
+    The `algorithm ?` help probe is the primary source (strict per-keyword);
+    show/config evidence and the IOS version matrix are fallbacks.
+    """
+    cap: dict = {"keywords": sorted(keywords)}
+    if keywords:
+        if keywords & {"mac", "kex", "encryption"}:
+            cap.update(level="supported", reason="algo-help")
+        else:
+            cap.update(level="unsupported", reason="algo-help")
+        return cap
     if show_algos["encryption"] or show_algos["mac"] or orig_algo:
-        return {"level": "supported", "reason": "algo-evidence"}
-    if ver["flavor"] == "xe" and (ver["major"], ver["minor"]) >= (16, 5):
-        return {"level": "supported", "reason": "xe-version"}
-    if ver["flavor"] == "classic":
-        return {"level": "unsupported", "reason": "classic-ios"}
-    return {"level": "unknown", "reason": "unknown"}
+        cap.update(level="supported", reason="algo-evidence")
+    elif ver["flavor"] == "xe" and (ver["major"], ver["minor"]) >= (16, 5):
+        cap.update(level="supported", reason="xe-version")
+    elif ver["flavor"] == "classic":
+        cap.update(level="unsupported", reason="classic-ios")
+    else:
+        cap.update(level="unknown", reason="unknown")
+    return cap
+
+
+def _kind_ok(kind: str, cap: dict, ver: dict) -> bool:
+    """May an algorithm line of this kind be attempted?"""
+    keywords = set(cap.get("keywords", []))
+    if keywords:
+        return kind in keywords  # strict: the CLI itself listed them
+    if ver.get("flavor") == "classic":
+        return False
+    return True  # XE>=16.5 matrix or unknown: the attempt will reveal it
 
 
 def analyze_ssh(scan: dict, show_ip_ssh: str = "",
-                ssh_include: str = "", version_out: str = "") -> dict:
+                ssh_include: str = "", version_out: str = "",
+                algo_help: str = "") -> dict:
     """Build the structured SSH-bundle result from check outputs."""
     from ssh_scan import parse_show_ip_ssh_algos
 
@@ -148,8 +193,11 @@ def analyze_ssh(scan: dict, show_ip_ssh: str = "",
     show_algos = parse_show_ip_ssh_algos(show)
     cfg = _parse_algo_config(ssh_include)
     ver = _parse_version(version_out)
-    cap = _capability(show_algos, cfg["algo"], ver)
-    algo_ok = cap["level"] != "unsupported"
+    keywords = _parse_algo_help(algo_help)
+    cap = _capability(show_algos, cfg["algo"], ver, keywords)
+    mac_ok = _kind_ok("mac", cap, ver)
+    kex_ok = _kind_ok("kex", cap, ver)
+    enc_ok = _kind_ok("encryption", cap, ver)
 
     kept_mac = [m for m in macs if not _is_weak_mac(m)]
     kept_kex = [k for k in kex if not _is_weak_kex(k)]
@@ -159,19 +207,19 @@ def analyze_ssh(scan: dict, show_ip_ssh: str = "",
     subs: dict[str, dict] = {
         "mac": {"status": "fail" if weak_mac else "ok", "found": weak_mac,
                 "kept": kept_mac,
-                "appliable": bool(weak_mac) and algo_ok and bool(kept_mac)},
+                "appliable": bool(weak_mac) and mac_ok and bool(kept_mac)},
         "kex": {"status": "fail" if weak_kex else "ok", "found": weak_kex,
                 "kept": kept_kex,
-                "appliable": bool(weak_kex) and algo_ok and bool(kept_kex)},
+                "appliable": bool(weak_kex) and kex_ok and bool(kept_kex)},
         "cbc": {"status": "fail" if cbc else "ok", "found": cbc,
                 "kept": kept_ciphers,
-                "appliable": bool(cbc) and algo_ok and bool(kept_ciphers)},
+                "appliable": bool(cbc) and enc_ok and bool(kept_ciphers)},
         "terrapin": {
             "status": "fail" if terrapin else "ok",
             "found": ([CHACHA] if chacha and not strict else [])
                      + (["cbc+etm"] if cbc_etm and not strict else []),
             "kept": kept_ciphers,
-            "appliable": bool(terrapin) and algo_ok
+            "appliable": bool(terrapin) and enc_ok
                          and bool(kept_ciphers)
                          and not any(_is_cbc(c) for c in kept_ciphers)
                          and (strict or CHACHA not in kept_ciphers)},
@@ -315,6 +363,25 @@ def rollback_verified(targets: list[dict], after: dict) -> bool:
     return True
 
 
+def split_fix_groups(targets: list[dict], result: dict | None = None
+                     ) -> list[tuple[str, list[dict]]]:
+    """Group targets for sequential apply: mac, kex, encryption, version.
+
+    One group per config line, so a rejected keyword (e.g. no `kex` on
+    older IOS) fails alone while the rest still applies.
+    """
+    groups: list[tuple[str, list[dict]]] = []
+    bucket: dict[str, list[dict]] = {}
+    for t in targets or []:
+        name = {"mac": "mac", "kex": "kex", "cbc": "encryption",
+                "terrapin": "encryption", "sshv1": "version"}[t["sub"]]
+        bucket.setdefault(name, []).append(t)
+    for name in ("mac", "kex", "encryption", "version"):
+        if bucket.get(name):
+            groups.append((name, bucket[name]))
+    return groups
+
+
 def fetch_check_run(host: str, username: str, password: str,
                     enable: str | None = None, port: int = 22,
                     debug_log: str | None = None) -> dict:
@@ -331,7 +398,8 @@ def fetch_check_run(host: str, username: str, password: str,
         timeout=15, commands=CHECK_COMMANDS, debug_log=debug_log)
     return analyze_ssh(scan, out.get(CHECK_COMMANDS[0], ""),
                        out.get(CHECK_COMMANDS[1], ""),
-                       out.get(CHECK_COMMANDS[2], ""))
+                       out.get(CHECK_COMMANDS[2], ""),
+                       out.get(CHECK_COMMANDS[4], ""))
 
 
 def fetch_check_session(sess) -> dict:
@@ -344,7 +412,8 @@ def fetch_check_session(sess) -> dict:
         raise RuntimeError(f"{sess.host}: SSH scan failed: {e}") from e
     out = {cmd: sess.exec(cmd, 2.5) for cmd in CHECK_COMMANDS}
     return analyze_ssh(scan, out[CHECK_COMMANDS[0]],
-                       out[CHECK_COMMANDS[1]], out[CHECK_COMMANDS[2]])
+                       out[CHECK_COMMANDS[1]], out[CHECK_COMMANDS[2]],
+                       out[CHECK_COMMANDS[4]])
 
 
 def format_result(host: str, result: dict, T) -> list[tuple[str, str | None]]:
@@ -377,6 +446,9 @@ def format_result(host: str, result: dict, T) -> list[tuple[str, str | None]]:
         reason=T("ssh_capreason_" + cap.get("reason", "unknown"))) + "\n",
         "vuln_ok" if level == "supported"
         else ("vuln_warn" if level == "unknown" else "vuln_fail")))
+    if cap.get("keywords"):
+        segs.append((T("ssh_cap_keywords").format(
+            kw=", ".join(cap["keywords"])) + "\n", None))
     if result.get("compliant"):
         segs.append((T("vuln_ssh_ok") + "\n", "vuln_ok"))
     else:
@@ -387,3 +459,20 @@ def format_result(host: str, result: dict, T) -> list[tuple[str, str | None]]:
 def verify_prompt(host: str, T) -> tuple[str, str]:
     return (T("ssh_verify_title").format(host=host),
             T("ssh_verify_msg").format(host=host))
+
+
+def residual_summary(result: dict, T) -> tuple[str, str] | None:
+    """Final per-device verdict after apply/rollback (log line + tag)."""
+    if not result or result.get("vuln") != "ssh":
+        return None
+    bad = []
+    for sub in SUBS:
+        s = result.get("subs", {}).get(sub, {})
+        if s.get("status") == "fail":
+            found = ", ".join(s.get("found", []))
+            bad.append(f"{T('ssh_sub_' + sub)}"
+                       + (f" ({found})" if found else ""))
+    if not bad:
+        return T("vuln_ssh_ok"), "vuln_ok"
+    return (T("vuln_apply_residual").format(items="; ".join(bad)),
+            "vuln_fail")

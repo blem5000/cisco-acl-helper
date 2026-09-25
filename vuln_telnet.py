@@ -52,10 +52,12 @@ __all__ = [
     "build_rollback_commands",
     "fix_verified",
     "rollback_verified",
+    "split_fix_groups",
     "fetch_check_run",
     "fetch_check_session",
     "format_result",
     "verify_prompt",
+    "residual_summary",
 ]
 
 VULN_ID = "telnet"
@@ -327,6 +329,12 @@ def rollback_verified(targets: list[dict], after: dict) -> bool:
     return bool(want) and all(got.get(r) == t for r, t in want.items())
 
 
+def split_fix_groups(targets: list[dict], result: dict | None = None
+                     ) -> list[tuple[str, list[dict]]]:
+    """Telnet fix is a single group (all vty ranges in one configure pass)."""
+    return [("vty", list(targets or []))] if targets else []
+
+
 def fetch_check_run(host: str, username: str, password: str,
                     enable: str | None = None, port: int = 22,
                     debug_log: str | None = None) -> dict:
@@ -385,3 +393,15 @@ def format_result(host: str, result: dict, T) -> list[tuple[str, str | None]]:
 def verify_prompt(host: str, T) -> tuple[str, str]:
     return (T("vuln_verify_title").format(host=host),
             T("vuln_verify_msg").format(host=host))
+
+
+def residual_summary(result: dict, T) -> tuple[str, str] | None:
+    """Final per-device verdict after apply/rollback (log line + tag)."""
+    if not result or result.get("vuln", "telnet") != "telnet":
+        return None
+    bad = [e.get("header", "?") for e in result.get("vty", [])
+           if not e.get("compliant")]
+    if not bad:
+        return T("vuln_ok"), "vuln_ok"
+    return (T("vuln_apply_residual").format(items=", ".join(bad)),
+            "vuln_fail")

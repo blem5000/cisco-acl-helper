@@ -170,5 +170,43 @@ class FixRollbackTest(unittest.TestCase):
         self.assertFalse(s.rollback_verified(targets, tampered))
 
 
+USER_HELP = ("  encryption  Encrytption algorithms advertised to other party\n"
+             "  mac         MAC algorithms advertised to other party\n")
+
+
+class AlgoHelpTest(unittest.TestCase):
+    def test_keywords_parsed(self):
+        self.assertEqual(s._parse_algo_help(USER_HELP), {"encryption", "mac"})
+        self.assertEqual(s._parse_algo_help("% Invalid input detected"),
+                         set())
+        self.assertEqual(s._parse_algo_help(""), set())
+
+    def test_help_drives_per_kind_capability(self):
+        # classic-style box WITH mac+encryption support, kex missing
+        # (the reported incident): kex goes to OpenProject, rest applies.
+        r = s.analyze_ssh(WEAK, "", "", CLASSIC_VER, USER_HELP)
+        self.assertEqual(r["capability"]["level"], "supported")
+        self.assertTrue(r["subs"]["mac"]["appliable"])
+        self.assertTrue(r["subs"]["cbc"]["appliable"])
+        self.assertFalse(r["subs"]["kex"]["appliable"])
+        self.assertIn("kex_manual", r["issues"])
+        subs = [t["sub"] for t in s.apply_targets(r)]
+        self.assertEqual(subs, ["mac", "cbc", "sshv1"])
+        groups = s.split_fix_groups(s.apply_targets(r), r)
+        self.assertEqual([g for g, _t in groups],
+                         ["mac", "encryption", "version"])
+        rb = s.build_rollback_commands(
+            [t for t in s.apply_targets(r) if t["sub"] in ("mac", "cbc")],
+            r)
+        self.assertNotIn("kex", " ".join(rb))
+
+    def test_split_groups_telnet_single(self):
+        import vuln_telnet as t
+
+        r = t.analyze_telnet("line vty 0 4\n transport input all", "")
+        targets = t.apply_targets(r)
+        self.assertEqual(t.split_fix_groups(targets, r)[0][0], "vty")
+
+
 if __name__ == "__main__":
     unittest.main()

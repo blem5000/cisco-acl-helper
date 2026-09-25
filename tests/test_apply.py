@@ -126,6 +126,8 @@ class ApplyWorkerTest(unittest.TestCase):
         )
         stub._try_rollback = types.MethodType(App._try_rollback, stub)
         stub._put_apply = types.MethodType(App._put_apply, stub)
+        stub._refresh_and_residual = types.MethodType(
+            App._refresh_and_residual, stub)
         # scoped patches: restored after the worker joins, no leakage
         with mock.patch.object(cisco_ssh, "ConfigSession", FakeSess), \
                 mock.patch.object(cisco_ssh, "run_commands",
@@ -134,7 +136,7 @@ class ApplyWorkerTest(unittest.TestCase):
                 target=types.MethodType(App._apply_worker, stub),
                 args=([dict(DEV)], vuln_telnet), daemon=True)
             worker.start()
-            chunks, confirms, done = [], [], None
+            chunks, confirms, refreshes, done = [], [], [], None
             while True:
                 kind, payload = stub.msg_queue.get(timeout=30)
                 if kind == "vuln_apply_confirm":
@@ -144,17 +146,19 @@ class ApplyWorkerTest(unittest.TestCase):
                     ev.set()
                 elif kind == "vuln_apply_chunk":
                     chunks.append(payload)
+                elif kind == "vuln_apply_refresh":
+                    refreshes.append(payload)
                 elif kind == "vuln_apply_done":
                     done = payload
                     break
             worker.join(timeout=30)
             self.assertFalse(worker.is_alive())
         text = "\n".join(t for segs in chunks for t, _tag in segs)
-        return done, text, confirms
+        return done, text, confirms, refreshes
 
     def test_confirm_yes_writes_memory(self):
         ApplyWorkerTest.posttest_fail = False
-        done, text, confirms = self._run_worker(True)
+        done, text, confirms, refreshes = self._run_worker(True)
         sess = FakeSess.created[-1]
         self.assertEqual(done, {"ok": 1, "rb": 0, "fail": 0, "skip": 0})
         self.assertEqual(len(confirms), 1)
@@ -164,10 +168,16 @@ class ApplyWorkerTest(unittest.TestCase):
         self.assertIn("pre-flight OK", text)
         self.assertIn("New SSH login works", text)
         self.assertIn("write memory done", text)
+        # final verdict: device fully clean, refresh carries compliant result
+        self.assertEqual(len(refreshes), 1)
+        host, fresh = refreshes[0]
+        self.assertEqual(host, "10.0.0.1")
+        self.assertTrue(fresh["compliant"])
+        self.assertIn("OK: Telnet disabled", text)
 
     def test_confirm_no_rolls_back(self):
         ApplyWorkerTest.posttest_fail = False
-        done, text, confirms = self._run_worker(False)
+        done, text, confirms, refreshes = self._run_worker(False)
         sess = FakeSess.created[-1]
         self.assertEqual(done, {"ok": 0, "rb": 1, "fail": 0, "skip": 0})
         self.assertEqual(len(confirms), 1)
@@ -175,16 +185,20 @@ class ApplyWorkerTest(unittest.TestCase):
         self.assertNotIn("write memory", sess.log)
         self.assertEqual(sess.state, {"0 4": "all", "5 15": None})
         self.assertIn("Rolled back", text)
+        self.assertEqual(len(refreshes), 1)
+        _host, fresh = refreshes[0]
+        self.assertFalse(fresh["compliant"])
 
     def test_failed_posttest_auto_rolls_back_without_dialog(self):
         ApplyWorkerTest.posttest_fail = True
-        done, text, confirms = self._run_worker(True)
+        done, text, confirms, refreshes = self._run_worker(True)
         sess = FakeSess.created[-1]
         self.assertEqual(done, {"ok": 0, "rb": 0, "fail": 1, "skip": 0})
         self.assertEqual(confirms, [])
         self.assertNotIn("write memory", sess.log)
         self.assertEqual(sess.state, {"0 4": "all", "5 15": None})
         self.assertIn("New SSH login FAILED", text)
+        self.assertEqual(len(refreshes), 1)
 
 
 if __name__ == "__main__":

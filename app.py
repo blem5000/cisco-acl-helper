@@ -32,6 +32,30 @@ from version import __version__ as APP_VERSION
 VULN_MODS = {"telnet": vuln_telnet, "ssh": vuln_ssh}
 
 
+def _first_reject_line(err) -> str:
+    """First IOS rejection line of a ConfigFailed error (for the report)."""
+    try:
+        cmd, out = err.failures[0]
+        first = out.splitlines()[0] if out.splitlines() else "?"
+        return f"{cmd}: {first}"
+    except Exception:
+        return str(err)
+
+
+def _rejected_unsupported(err) -> bool:
+    """True when EVERY rejected command looks like an unknown keyword
+    (older IOS without that sub-command) rather than a real failure."""
+    try:
+        failures = err.failures
+    except AttributeError:
+        return False
+    if not failures:
+        return False
+    return all(re.search(r"invalid|unknown command|incomplete|ambiguous",
+                         out, re.IGNORECASE)
+               for _cmd, out in failures)
+
+
 def app_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
@@ -2017,22 +2041,34 @@ class App(tk.Tk):
         threading.Thread(target=self._apply_worker, args=(devs, mod),
                          daemon=True).start()
 
-    def _try_rollback(self, sess, mod, targets: list) -> bool:
-        """Restore pre-fix state; True only if verified afterwards."""
+    def _try_rollback(self, sess, mod, targets: list
+                      ) -> tuple[bool, dict | None]:
+        """Restore pre-fix state; (verified?, fresh result or None)."""
         if not targets or not sess.alive():
-            return False
+            return False, None
         try:
             sess.configure(mod.build_rollback_commands(targets))
             fresh = mod.fetch_check_session(sess)
         except Exception:
-            return False
+            return False, None
         try:
-            return bool(mod.rollback_verified(targets, fresh))
+            return bool(mod.rollback_verified(targets, fresh)), fresh
         except Exception:
-            return False
+            return False, None
 
     def _put_apply(self, lines: list[tuple[str, str | None]]):
         self.msg_queue.put(("vuln_apply_chunk", lines))
+
+    def _refresh_and_residual(self, host: str, mod, fresh: dict | None):
+        """Push the final per-device verdict: fresh residual line for the
+        log plus a data refresh (proposal box follows the new state)."""
+        if fresh is None:
+            return
+        summary = mod.residual_summary(fresh, self.T)
+        if summary is not None:
+            text, tag = summary
+            self._put_apply([(text + "\n", tag)])
+        self.msg_queue.put(("vuln_apply_refresh", (host, fresh)))
 
     def _apply_worker(self, devs: list[dict], mod):
         ok = rb = fail = skip = 0
@@ -2073,7 +2109,7 @@ class App(tk.Tk):
                     continue
                 changed = [dict(e) for e in targets]
                 # Pre-flight: a FRESH login must work before we touch
-                # transport (the main session alone does not prove that a
+                # anything (the main session alone does not prove that a
                 # new login with these credentials succeeds right now).
                 self._put_apply(
                     [(self.T("vuln_st_preflight").format(host=host) + "\n",
@@ -2092,17 +2128,39 @@ class App(tk.Tk):
                     continue
                 self._put_apply([(self.T("vuln_preflight_ok") + "\n",
                                   "vuln_ok")])
+                # Apply group by group: a rejected keyword (e.g. no `kex`
+                # on older IOS) fails alone while the rest still applies.
+                # Rollback later covers only groups that went in.
                 self._put_apply(
                     [(self.T("vuln_st_applying").format(host=host) + "\n",
                       None)])
-                sess.configure(mod.build_fix_commands(targets))
+                applied: list[dict] = []
+                for gname, gtargets in mod.split_fix_groups(targets, res):
+                    try:
+                        sess.configure(mod.build_fix_commands(gtargets, res))
+                        applied.extend(dict(e) for e in gtargets)
+                    except cisco_ssh.ConfigFailed as e:
+                        if _rejected_unsupported(e):
+                            self._put_apply([(
+                                self.T("vuln_group_unsupported").format(
+                                    group=gname,
+                                    detail=_first_reject_line(e)) + "\n",
+                                "vuln_warn")])
+                        else:
+                            raise
+                if not applied:
+                    skip += 1
+                    continue
+                changed = applied
                 res2 = mod.fetch_check_session(sess)
-                if not mod.fix_verified(res2, targets):
-                    detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                        sess, mod, changed) else self.T("vuln_rb_bad"))
+                if not mod.fix_verified(res2, applied):
+                    rb_ok, fresh = self._try_rollback(sess, mod, changed)
+                    detail = (self.T("vuln_rb_ok") if rb_ok
+                              else self.T("vuln_rb_bad"))
                     self._put_apply(
                         [(self.T("vuln_apply_postfail").format(detail=detail)
                           + "\n", "vuln_fail")])
+                    self._refresh_and_residual(host, mod, fresh)
                     fail += 1
                     continue
                 # Fix is in running-config (NOT saved). First OUR OWN test:
@@ -2118,11 +2176,13 @@ class App(tk.Tk):
                         timeout=15, commands=["show clock"],
                         debug_log=self._ssh_debug_log())
                 except Exception as e:
-                    detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                        sess, mod, changed) else self.T("vuln_rb_bad"))
+                    rb_ok, fresh = self._try_rollback(sess, mod, changed)
+                    detail = (self.T("vuln_rb_ok") if rb_ok
+                              else self.T("vuln_rb_bad"))
                     self._put_apply(
                         [(self.T("vuln_posttest_fail").format(
                             err=e, detail=detail) + "\n", "vuln_fail")])
+                    self._refresh_and_residual(host, mod, fresh)
                     fail += 1
                     continue
                 self._put_apply([(self.T("vuln_posttest_ok") + "\n",
@@ -2165,24 +2225,34 @@ class App(tk.Tk):
                         [(self.T("vuln_apply_saved").format(
                             line=last[-1] if last else "OK") + "\n",
                           "vuln_ok")])
+                    # Final truth: re-read AFTER the save, then verdict.
+                    try:
+                        final = mod.fetch_check_session(sess)
+                    except Exception:
+                        final = None
+                    self._refresh_and_residual(host, mod, final)
                     ok += 1
                 else:
-                    detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                        sess, mod, changed) else self.T("vuln_rb_bad"))
+                    rb_ok, fresh = self._try_rollback(sess, mod, changed)
+                    detail = (self.T("vuln_rb_ok") if rb_ok
+                              else self.T("vuln_rb_bad"))
                     tag = ("vuln_warn" if detail == self.T("vuln_rb_ok")
                            else "vuln_fail")
                     self._put_apply(
                         [(self.T("vuln_apply_rb_user").format(detail=detail)
                           + "\n", tag)])
+                    self._refresh_and_residual(host, mod, fresh)
                     rb += 1
             except cisco_ssh.ConfigFailed as e:
-                detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                    sess, mod, changed) else self.T("vuln_rb_bad"))
+                rb_ok, fresh = self._try_rollback(sess, mod, changed)
+                detail = (self.T("vuln_rb_ok") if rb_ok
+                          else self.T("vuln_rb_bad"))
                 self._put_apply(
                     [(self.T("vuln_apply_error").format(err=e) + "\n",
                       "vuln_fail"),
                      (self.T("vuln_apply_postfail").format(detail=detail)
                       + "\n", "vuln_fail")])
+                self._refresh_and_residual(host, mod, fresh)
                 fail += 1
             except Exception as e:
                 if changed:
@@ -3306,6 +3376,13 @@ class App(tk.Tk):
                         ok = False
                     box["ok"] = bool(ok)
                     ev.set()
+                elif kind == "vuln_apply_refresh":
+                    host, fresh = payload
+                    for i, (h, _r, e) in enumerate(self.vuln_results):
+                        if h == host and not e:
+                            self.vuln_results[i] = (host, fresh, None)
+                            break
+                    self._rebuild_vuln_proposal()
                 elif kind == "vuln_apply_done":
                     self._finish_apply_done(payload)
                 elif kind == "gen_done":
