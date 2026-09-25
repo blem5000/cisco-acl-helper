@@ -42,6 +42,7 @@ __all__ = [
     "format_result",
     "verify_prompt",
     "residual_summary",
+    "openproject_note",
 ]
 
 VULN_ID = "ssh"
@@ -87,6 +88,13 @@ def _is_etm(name: str) -> bool:
     return "etm" in name.lower()
 
 
+def _ios_short(version_out: str) -> str:
+    """One-line IOS identification for reports ('' when unknown)."""
+    m = re.search(r"Cisco IOS (?:XE )?Software[^,\n]*,\s*Version\s+[^,\n]+",
+                  version_out or "", re.IGNORECASE)
+    return re.sub(r"\s+", " ", m.group(0).strip()) if m else ""
+
+
 def _parse_algo_help(help_out: str) -> set[str]:
     """Keywords from `ip ssh server algorithm ?` (empty when unsupported)."""
     found: set[str] = set()
@@ -124,10 +132,42 @@ def _parse_version(version_out: str) -> dict:
         return {"flavor": "xe", "major": int(m.group(1)),
                 "minor": int(m.group(2))}
     if re.search(r"Cisco IOS Software", text, re.IGNORECASE):
+        m2 = re.search(r"Version\s+(\d+)\.(\d+)", text, re.IGNORECASE)
+        if m2:
+            return {"flavor": "classic",
+                    "major": int(m2.group(1)), "minor": int(m2.group(2))}
         m2 = re.search(r"Version\s+(\d+)", text, re.IGNORECASE)
         return {"flavor": "classic",
                 "major": int(m2.group(1)) if m2 else 0, "minor": 0}
     return {"flavor": "unknown", "major": 0, "minor": 0}
+
+
+def _matrix_ok(kind: str, ver: dict):
+    """Version-matrix fallback when the `?` probe gave nothing.
+
+    Tri-state: True (assumed supported), False (assumed absent),
+    None (unknown - the apply attempt will reveal it, gracefully).
+    Sources: `ip ssh server algorithm kex` born in XE 16.3 (Cisco
+    Command Reference, classic IOS never listed); encryption/mac on
+    classic since 15.2(2); late E-train backports (e.g. 15.2(7)E)
+    carry kex, so classic kex stays unknown rather than False.
+    """
+    flavor, major, minor = ver["flavor"], ver["major"], ver["minor"]
+    if flavor == "xe":
+        if (major, minor) >= (16, 5):
+            return True
+        if kind == "kex":
+            return (major, minor) >= (16, 3)
+        if (major, minor) >= (3, 5):
+            return True
+        return None
+    if flavor == "classic":
+        if kind == "kex":
+            return None
+        if (major, minor) >= (15, 2):
+            return True
+        return False
+    return None
 
 
 def _capability(show_algos: dict, orig_algo: dict, ver: dict,
@@ -146,9 +186,15 @@ def _capability(show_algos: dict, orig_algo: dict, ver: dict,
         return cap
     if show_algos["encryption"] or show_algos["mac"] or orig_algo:
         cap.update(level="supported", reason="algo-evidence")
-    elif ver["flavor"] == "xe" and (ver["major"], ver["minor"]) >= (16, 5):
-        cap.update(level="supported", reason="xe-version")
-    elif ver["flavor"] == "classic":
+        return cap
+    verdicts = {k: _matrix_ok(k, ver)
+                for k in ("mac", "kex", "encryption")}
+    if any(v is True for v in verdicts.values()):
+        reason = ("xe-version" if ver["flavor"] == "xe"
+                  and (ver["major"], ver["minor"]) >= (16, 5)
+                  else "ios-matrix")
+        cap.update(level="supported", reason=reason)
+    elif all(v is False for v in verdicts.values()):
         cap.update(level="unsupported", reason="classic-ios")
     else:
         cap.update(level="unknown", reason="unknown")
@@ -160,9 +206,8 @@ def _kind_ok(kind: str, cap: dict, ver: dict) -> bool:
     keywords = set(cap.get("keywords", []))
     if keywords:
         return kind in keywords  # strict: the CLI itself listed them
-    if ver.get("flavor") == "classic":
-        return False
-    return True  # XE>=16.5 matrix or unknown: the attempt will reveal it
+    res = _matrix_ok(kind, ver)
+    return res is not False  # None (unknown) -> the attempt will reveal it
 
 
 def analyze_ssh(scan: dict, show_ip_ssh: str = "",
@@ -247,6 +292,7 @@ def analyze_ssh(scan: dict, show_ip_ssh: str = "",
                  "kex": kex, "ciphers": ciphers, "macs": macs,
                  "strict_kex": strict},
         "capability": cap,
+        "ios": _ios_short(version_out),
         "orig_algo": cfg["algo"],
         "orig_version": cfg["version"],
         "show_algos": show_algos,
@@ -476,3 +522,38 @@ def residual_summary(result: dict, T) -> tuple[str, str] | None:
         return T("vuln_ssh_ok"), "vuln_ok"
     return (T("vuln_apply_residual").format(items="; ".join(bad)),
             "vuln_fail")
+
+
+def openproject_note(host: str, result: dict, T) -> str:
+    """Paste-ready justification for findings that cannot be auto-fixed."""
+    if not result or result.get("vuln") != "ssh":
+        return ""
+    subs = result.get("subs", {})
+    manual = [s for s in SUBS
+              if subs.get(s, {}).get("status") == "fail"
+              and not subs.get(s, {}).get("appliable")]
+    if not manual:
+        return ""
+    cap = result.get("capability", {})
+    keywords = cap.get("keywords", [])
+    lines = [T("vuln_note_header").format(host=host)]
+    if result.get("ios"):
+        lines.append(T("ssh_note_version").format(ios=result["ios"]))
+    if keywords:
+        lines.append(T("ssh_note_keywords").format(
+            kw=", ".join(keywords)))
+    kind_of = {"mac": "mac", "kex": "kex", "cbc": "encryption",
+               "terrapin": "encryption"}
+    for sub in manual:
+        s = subs[sub]
+        algos = ", ".join(s.get("found", [])) or "?"
+        if not s.get("kept"):
+            why = T("ssh_note_emptykept")
+        elif keywords:
+            why = T("ssh_note_nokeyword").format(kind=kind_of[sub])
+        else:
+            why = T("ssh_note_unsupported")
+        lines.append(T("ssh_note_item").format(sub=T("ssh_sub_" + sub),
+                                               algos=algos, why=why))
+    lines.append(T("ssh_note_footer"))
+    return "\n".join(lines)

@@ -896,6 +896,9 @@ class App(tk.Tk):
         self.btn_vuln_marked = ttk.Button(vbtns, text="",
                                           command=self.vuln_select_marked)
         self.btn_vuln_marked.pack(side="left", padx=2)
+        self.btn_vuln_note = ttk.Button(vbtns, text="",
+                                        command=self.show_vuln_notes)
+        self.btn_vuln_note.pack(side="left", padx=2)
         self.vuln_style = ttk.Style(self)
         self.vuln_style.configure("VulnWork.Horizontal.TProgressbar",
                                   background="gold", thickness=18)
@@ -1094,6 +1097,7 @@ class App(tk.Tk):
         self.btn_vuln_all.configure(text=S["vuln_select_all"])
         self.btn_vuln_none.configure(text=S["vuln_select_none"])
         self.btn_vuln_marked.configure(text=S["vuln_marked_btn"])
+        self.btn_vuln_note.configure(text=S["vuln_note_btn"])
         self.lbl_vuln_results.configure(text=S["vuln_results_label"])
         self.lbl_vuln_prop.configure(text=S["vuln_proposal_label"])
         self._refresh_vuln_combo()
@@ -1999,6 +2003,44 @@ class App(tk.Tk):
                                      style="Horizontal.TProgressbar", value=0)
         except tk.TclError:
             pass
+
+    def _collect_vuln_notes(self) -> str:
+        """Paste-ready OpenProject reasons for unfixable findings."""
+        parts = []
+        for host, res, err in self.vuln_results:
+            if err or not res:
+                continue
+            mod = self._vuln_mod(res.get("vuln", "telnet"))
+            note = mod.openproject_note(host, res, self.T)
+            if note:
+                parts.append(note)
+        return "\n\n".join(parts)
+
+    def show_vuln_notes(self):
+        text = self._collect_vuln_notes()
+        if not text.strip():
+            messagebox.showinfo("ACL", self.T("nothing_to_copy"))
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title(self.T("vuln_note_title"))
+        dlg.geometry("640x380")
+        dlg.transient(self)
+        txt = tk.Text(dlg, wrap="word", font=("Consolas", 10))
+        txt.pack(fill="both", expand=True, padx=10, pady=(10, 6))
+        txt.insert("1.0", text)
+        txt.configure(state="disabled")
+        fr = ttk.Frame(dlg)
+        fr.pack(fill="x", padx=10, pady=(0, 10))
+
+        def _copy():
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self._toast(self.T("copied"))
+
+        ttk.Button(fr, text=self.T("copy_btn"), command=_copy).pack(
+            side="left", padx=(0, 6))
+        ttk.Button(fr, text=self.T("cancel_btn"),
+                   command=dlg.destroy).pack(side="left", padx=6)
 
     # ---------- vulnerabilities: apply the fix (one open session per device)
     def start_vuln_apply(self):

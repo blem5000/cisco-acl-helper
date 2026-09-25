@@ -58,6 +58,7 @@ __all__ = [
     "format_result",
     "verify_prompt",
     "residual_summary",
+    "openproject_note",
 ]
 
 VULN_ID = "telnet"
@@ -405,3 +406,20 @@ def residual_summary(result: dict, T) -> tuple[str, str] | None:
         return T("vuln_ok"), "vuln_ok"
     return (T("vuln_apply_residual").format(items=", ".join(bad)),
             "vuln_fail")
+
+
+def openproject_note(host: str, result: dict, T) -> str:
+    """Paste-ready justification for findings that cannot be auto-fixed."""
+    if not result or result.get("vuln", "telnet") != "telnet":
+        return ""
+    vty = result.get("vty", [])
+    blocked = [e.get("header", "?") for e in vty
+               if e.get("status") == "blocked"]
+    lines: list[str] = []
+    if not vty:
+        lines.append(T("telnet_note_novty"))
+    for header in blocked:
+        lines.append(T("telnet_note_blocked").format(header=header))
+    if not lines:
+        return ""
+    return T("vuln_note_header").format(host=host) + "\n" + "\n".join(lines)

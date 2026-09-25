@@ -95,16 +95,19 @@ class FindingsTest(unittest.TestCase):
 class CapabilityTest(unittest.TestCase):
     def test_classic_ios_unsupported_but_sshv1_appliable(self):
         r = s.analyze_ssh(WEAK, "", "", CLASSIC_VER)
-        self.assertEqual(r["capability"]["level"], "unsupported")
-        for sub in ("mac", "kex", "cbc"):
+        # 15.0 predates algorithm commands; kex stays attempt-based
+        # (late E-train backports exist) and reveals itself gracefully
+        self.assertEqual(r["capability"]["level"], "unknown")
+        for sub in ("mac", "cbc"):
             self.assertFalse(r["subs"][sub]["appliable"])
             self.assertIn(f"{sub}_manual", r["issues"])
+        self.assertTrue(r["subs"]["kex"]["appliable"])
         self.assertTrue(r["subs"]["sshv1"]["appliable"])
         self.assertTrue(s.needs_apply(r))
         targets = s.apply_targets(r)
-        self.assertEqual([t["sub"] for t in targets], ["sshv1"])
-        self.assertEqual(s.build_fix_commands(targets, r),
-                         ["ip ssh version 2"])
+        self.assertEqual([t["sub"] for t in targets], ["kex", "sshv1"])
+        self.assertIn("ip ssh version 2",
+                      s.build_fix_commands(targets, r))
 
     def test_empty_kept_impossible(self):
         r = s.analyze_ssh(scan(macs=["hmac-sha1-96"],
@@ -206,6 +209,44 @@ class AlgoHelpTest(unittest.TestCase):
         r = t.analyze_telnet("line vty 0 4\n transport input all", "")
         targets = t.apply_targets(r)
         self.assertEqual(t.split_fix_groups(targets, r)[0][0], "vty")
+
+
+CAT2960X = ("Cisco IOS Software, C2960X Software "
+            "(C2960X-UNIVERSALK9-M), Version 15.2(2)E7, RELEASE SOFTWARE (fc4)")
+IOS122 = ("Cisco IOS Software, C3750 Software (C3750-IPBASE-M), "
+          "Version 12.2(55)SE10, RELEASE SOFTWARE (fc1)")
+XE162 = "Cisco IOS XE Software, Version 16.02.01\nCisco IOS Software ..."
+XE37 = "Cisco IOS XE Software, Version 03.07.00\nCisco IOS Software ..."
+
+
+class VersionMatrixTest(unittest.TestCase):
+    def test_2960x_152_2e7_assumes_mac_enc_kex_attempt(self):
+        # reporter's box: enc/mac documented since 15.2(2), kex unknown zone
+        r = s.analyze_ssh(WEAK, "", "", CAT2960X)
+        self.assertEqual(r["capability"]["level"], "supported")
+        self.assertEqual(r["capability"]["reason"], "ios-matrix")
+        self.assertTrue(r["subs"]["mac"]["appliable"])
+        self.assertTrue(r["subs"]["cbc"]["appliable"])
+        self.assertTrue(r["subs"]["kex"]["appliable"])  # attempt reveals
+
+    def test_ios122_no_algorithm_lines(self):
+        r = s.analyze_ssh(WEAK, "", "", IOS122)
+        self.assertFalse(r["subs"]["mac"]["appliable"])
+        self.assertFalse(r["subs"]["cbc"]["appliable"])
+        self.assertEqual(r["capability"]["level"], "unknown")
+
+    def test_xe162_kex_before_introduction(self):
+        # `ip ssh server algorithm kex` born in XE 16.3 (Command Reference)
+        r = s.analyze_ssh(WEAK, "", "", XE162)
+        self.assertFalse(r["subs"]["kex"]["appliable"])
+        self.assertIn("kex_manual", r["issues"])
+        self.assertTrue(r["subs"]["mac"]["appliable"])
+
+    def test_xe37_mac_enc_but_no_kex(self):
+        r = s.analyze_ssh(WEAK, "", "", XE37)
+        self.assertTrue(r["subs"]["mac"]["appliable"])
+        self.assertTrue(r["subs"]["cbc"]["appliable"])
+        self.assertFalse(r["subs"]["kex"]["appliable"])
 
 
 if __name__ == "__main__":
