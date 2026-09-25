@@ -1342,6 +1342,9 @@ class App(tk.Tk):
             self.msg_queue.put(("update_download_error", str(e)))
 
     def _finish_update_download(self, zip_path: str, info: dict):
+        # No extra confirmation here: the user already chose
+        # "Download & Install", and the app cannot be used while the
+        # updater replaces its files -- install straight away.
         self._update_zip_path = zip_path
         try:
             if self._update_prog_var is not None:
@@ -1350,11 +1353,6 @@ class App(tk.Tk):
                 self._update_prog.configure(value=100)
         except tk.TclError:
             pass
-        if not messagebox.askyesno(
-                self.T("upd_available_title"),
-                self.T("upd_install_confirm").format(tag=info["tag"]),
-                parent=self._update_dialog):
-            return
         try:
             self._launch_installer(zip_path, info["tag"])
         except Exception as e:
