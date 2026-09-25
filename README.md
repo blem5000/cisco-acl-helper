@@ -35,10 +35,11 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada
   po IP lub nazwie hosta, opcjonalnie logowanie poświadczeniami urządzenia
   nadrzędnego).
-- **Podatności** — sprawdzanie podatności (na początek nieszyfrowany Telnet:
+- **Podatności** — sprawdzanie podatności (nieszyfrowany Telnet:
   każda `line vty` musi mieć `transport input ssh`) na urządzeniach
   zaznaczonych ✓ w zakładce Urządzenia, równolegle do 5 hostów, wyniki
-  kolorowane (czerwone/zielone). Przycisk **Zastosuj poprawkę** pracuje
+  kolorowane (czerwone/zielone). Opcja **Sprawdź wszystko** (domyślna)
+  uruchamia wszystkie kontrole z listy naraz. Przycisk **Zastosuj poprawkę** pracuje
   bezpiecznie na jednej otwartej sesji: świeże sprawdzenie i pre-flight
   (świeże logowanie SSH) → konfiguracja → weryfikacja w running-config
   i automatyczny test nowej sesji SSH (przy odmowie natychmiastowy
@@ -53,6 +54,14 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   tylko tam, gdzie switch je obsługuje (auto-wykrywanie z `show ip ssh`
   i wersji IOS-XE vs klasyczny IOS) — reszta trafia do opisu w OpenProject.
   Wdrażanie tym samym bezpiecznym protokołem co Telnet.
+  Mapowanie 1:1 na tytuły skanera (identyczne w obu językach):
+  | Tytuł skanera | Co program sprawdza w ofercie serwera |
+  |---|---|
+  | SSH Weak MAC Algorithms Enabled | MAC z MD5 / `*-96` / `umac-64*` |
+  | SSH Weak Key Exchange Algorithms Enabled | `gex-sha1`, `group1-sha1`, `gss-*`, `rsa1024-sha1` |
+  | SSH Server CBC Mode Ciphers Enabled | szyfry `*-cbc` |
+  | SSH Terrapin Prefix Truncation Weakness (CVE-2023-48795) | ChaCha20 albo CBC+z-EtM bez strict-kex |
+  | SSH Protocol Version 1 Session Key Retrieval | banner `SSH-1.x` / `version 1.99` |
 - **Ustawienia** — język, adres serwera DHCP, zmiana hasła głównego,
   opcjonalny log debugowania SSH (`ssh_debug.log`).
 

@@ -142,6 +142,7 @@ class ApplySSHTest(unittest.TestCase):
         )
         stub._try_rollback = types.MethodType(App._try_rollback, stub)
         stub._put_apply = types.MethodType(App._put_apply, stub)
+        stub._apply_worker = types.MethodType(App._apply_worker, stub)
         stub._refresh_and_residual = types.MethodType(
             App._refresh_and_residual, stub)
         with mock.patch.object(cisco_ssh, "ConfigSession", FakeSess), \
@@ -151,8 +152,8 @@ class ApplySSHTest(unittest.TestCase):
                                   lambda h, p=22, timeout=10.0:
                                   FakeSess.switches[h].scan()):
             worker = threading.Thread(
-                target=types.MethodType(App._apply_worker, stub),
-                args=([dict(DEV)], vuln_ssh), daemon=True)
+                target=types.MethodType(App._apply_all_worker, stub),
+                args=([([dict(DEV)], vuln_ssh)],), daemon=True)
             worker.start()
             chunks, confirms, refreshes, done = [], [], [], None
             while True:
@@ -191,7 +192,7 @@ class ApplySSHTest(unittest.TestCase):
         self.assertFalse(fresh["compliant"])
         self.assertEqual(fresh["subs"]["mac"]["status"], "ok")
         self.assertEqual(fresh["subs"]["kex"]["status"], "fail")
-        self.assertIn("Weak key exchange", text)
+        self.assertIn("SSH Weak Key Exchange Algorithms Enabled", text)
 
     def test_rejected_kex_group_skipped_rest_saved(self):
         done, text, confirms, refreshes = self._run_worker("% Invalid input detected")

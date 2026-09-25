@@ -126,6 +126,7 @@ class ApplyWorkerTest(unittest.TestCase):
         )
         stub._try_rollback = types.MethodType(App._try_rollback, stub)
         stub._put_apply = types.MethodType(App._put_apply, stub)
+        stub._apply_worker = types.MethodType(App._apply_worker, stub)
         stub._refresh_and_residual = types.MethodType(
             App._refresh_and_residual, stub)
         # scoped patches: restored after the worker joins, no leakage
@@ -133,8 +134,8 @@ class ApplyWorkerTest(unittest.TestCase):
                 mock.patch.object(cisco_ssh, "run_commands",
                                   ApplyWorkerTest.fake_run_commands):
             worker = threading.Thread(
-                target=types.MethodType(App._apply_worker, stub),
-                args=([dict(DEV)], vuln_telnet), daemon=True)
+                target=types.MethodType(App._apply_all_worker, stub),
+                args=([([dict(DEV)], vuln_telnet)],), daemon=True)
             worker.start()
             chunks, confirms, refreshes, done = [], [], [], None
             while True:

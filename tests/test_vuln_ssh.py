@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import vuln_ssh as s
+from i18n import STRINGS
 
 XE_VER = "Cisco IOS XE Software, Version 17.06.01\nCisco IOS Software ..."
 CLASSIC_VER = ("Cisco IOS Software, C2960S Software (C2960S-UNIVERSALK9-M), "
@@ -247,6 +248,25 @@ class VersionMatrixTest(unittest.TestCase):
         self.assertTrue(r["subs"]["mac"]["appliable"])
         self.assertTrue(r["subs"]["cbc"]["appliable"])
         self.assertFalse(r["subs"]["kex"]["appliable"])
+
+
+class ExactTitlesTest(unittest.TestCase):
+    """Finding labels must match the scanner titles verbatim, in both
+    languages, so results can be compared 1:1 with the audit."""
+
+    EXPECTED = {
+        "mac": "SSH Weak MAC Algorithms Enabled",
+        "kex": "SSH Weak Key Exchange Algorithms Enabled",
+        "cbc": "SSH Server CBC Mode Ciphers Enabled",
+        "terrapin": "SSH Terrapin Prefix Truncation Weakness (CVE-2023-48795)",
+        "sshv1": "SSH Protocol Version 1 Session Key Retrieval",
+    }
+
+    def test_exact_scanner_titles_in_both_languages(self):
+        self.assertEqual(set(s.SUBS), set(self.EXPECTED))
+        for lang in ("en", "pl"):
+            for sub, title in self.EXPECTED.items():
+                self.assertEqual(STRINGS[lang]["ssh_sub_" + sub], title)
 
 
 if __name__ == "__main__":

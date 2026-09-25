@@ -31,6 +31,9 @@ from version import __version__ as APP_VERSION
 #: Vulnerability providers behind the shared check/apply workers.
 VULN_MODS = {"telnet": vuln_telnet, "ssh": vuln_ssh}
 
+#: Synthetic registry id running every provider; must stay out of VULN_MODS.
+VULN_ALL_ID = "all"
+
 
 def _first_reject_line(err) -> str:
     """First IOS rejection line of a ConfigFailed error (for the report)."""
@@ -1722,9 +1725,14 @@ class App(tk.Tk):
 
     # ---------- vulnerabilities tab (telnet first, registry-ready) ----------
     def _vuln_registry(self) -> list[tuple[str, str, str]]:
-        """Available checks: [(id, display name, description)]."""
+        """Available checks: [(id, display name, description)].
+
+        "Check all" stays first so it is the default selection.
+        """
         S = STRINGS[self.lang]
-        return [(vuln_telnet.VULN_ID, S["vuln_telnet_name"],
+        return [(VULN_ALL_ID, S["vuln_all_name"],
+                 S["vuln_all_desc"]),
+                (vuln_telnet.VULN_ID, S["vuln_telnet_name"],
                  S["vuln_telnet_desc"]),
                 (vuln_ssh.VULN_ID, S["vuln_ssh_name"],
                  S["vuln_ssh_desc"])]
@@ -1732,6 +1740,14 @@ class App(tk.Tk):
     @staticmethod
     def _vuln_mod(vuln_id: str):
         return VULN_MODS.get(vuln_id, vuln_telnet)
+
+    @staticmethod
+    def _vuln_mods(vuln_id: str) -> list:
+        """Provider modules for a registry id (all of them for "all")."""
+        if vuln_id == VULN_ALL_ID:
+            return [VULN_MODS[vid] for vid in ("telnet", "ssh")
+                    if vid in VULN_MODS]
+        return [VULN_MODS.get(vuln_id, vuln_telnet)]
 
     def _refresh_vuln_combo(self):
         reg = self._vuln_registry()
@@ -1857,7 +1873,7 @@ class App(tk.Tk):
             messagebox.showwarning("ACL", self.T("status_no_devices"))
             return
         vuln_id = self._selected_vuln_id()
-        mod = self._vuln_mod(vuln_id)
+        mods = self._vuln_mods(vuln_id)
         self.vuln_results = []
         self.vuln_proposal = ""
         self._set_vuln_text("")
@@ -1867,21 +1883,23 @@ class App(tk.Tk):
         self.btn_vuln_check.configure(state="disabled")
         self.btn_vuln_apply.configure(state="disabled")
         self.btn_vuln_stop.configure(state="normal")
-        self.vuln_prog.configure(maximum=len(devs), value=0,
+        self.vuln_prog.configure(maximum=len(devs) * len(mods), value=0,
                                    mode="indeterminate",
                                    style="VulnWork.Horizontal.TProgressbar")
         self.vuln_prog.start(12)
         self.status.set(self.T("status_searching").format(n=len(devs)))
         snapshot = [dict(d) for d in devs]
-        threading.Thread(target=self._vuln_worker, args=(snapshot, mod),
+        threading.Thread(target=self._vuln_worker, args=(snapshot, mods),
                          daemon=True).start()
 
     def stop_vuln_check(self):
         self._vuln_stop.set()
 
-    def _vuln_worker(self, devs: list[dict], mod):
-        """Check all selected switches in parallel (up to 5 SSH sessions)."""
-        def one_device(d: dict):
+    def _vuln_worker(self, devs: list[dict], mods: list):
+        """Check selected switches (up to 5 SSH sessions); one result chunk
+        per (device, provider), device-major order."""
+        def one_check(args):
+            d, mod = args
             host = d.get("host", "?")
             try:
                 res = mod.fetch_check_run(
@@ -1893,9 +1911,10 @@ class App(tk.Tk):
                 return (host, None, str(e))
 
         # keep original order: submit in order, collect in order
+        tasks = [(d, mod) for d in devs for mod in mods]
         with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(5, len(devs))) as ex:
-            futs = [ex.submit(one_device, d) for d in devs]
+                max_workers=min(5, len(tasks) or 1)) as ex:
+            futs = [ex.submit(one_check, t) for t in tasks]
             for fut in futs:
                 if self._vuln_stop.is_set():
                     for f in futs:
@@ -1979,8 +1998,9 @@ class App(tk.Tk):
         bad = sum(1 for _h, r, e in self.vuln_results
                   if not e and r and not r.get("compliant"))
         errs = sum(1 for _h, _r, e in self.vuln_results if e)
+        hosts = {h for h, _r, _e in self.vuln_results}
         stopped = self._vuln_stop.is_set()
-        base = self.T("vuln_summary").format(n=len(self.vuln_results),
+        base = self.T("vuln_summary").format(n=len(hosts),
                                              ok=ok, bad=bad, err=errs)
         self.status.set(base + (" " + self.T("vuln_stopped") if stopped else ""))
 
@@ -2053,8 +2073,11 @@ class App(tk.Tk):
             return
         cands = [(h, r) for h, r, e in self.vuln_results
                  if not e and r]
-        mod = self._vuln_mod(self._selected_vuln_id())
-        cands = [(h, r) for h, r in cands if mod.needs_apply(r)]
+        mods = self._vuln_mods(self._selected_vuln_id())
+        by_mod = {mod.VULN_ID: mod for mod in mods}
+        cands = [(h, r) for h, r in cands
+                 if by_mod.get((r or {}).get("vuln", ""),
+                               vuln_telnet).needs_apply(r)]
         if not cands:
             messagebox.showinfo("ACL", self.T("vuln_apply_none"))
             return
@@ -2071,6 +2094,17 @@ class App(tk.Tk):
                 devs.append(d)
         if not devs:
             return
+        groups: list[tuple[list, object]] = []
+        for mod in mods:
+            gdevs = [d for d in devs
+                     if any(h == d.get("host") and
+                            (r or {}).get("vuln", "") == mod.VULN_ID
+                            and mod.needs_apply(r)
+                            for h, r in cands)]
+            if gdevs:
+                groups.append((gdevs, mod))
+        if not groups:
+            return
         self._vuln_applying = True
         self._vuln_stop.clear()
         self.btn_vuln_check.configure(state="disabled")
@@ -2080,7 +2114,7 @@ class App(tk.Tk):
                                  style="VulnWork.Horizontal.TProgressbar")
         self.vuln_prog.start(12)
         self.status.set(self.T("vuln_apply_status").format(n=len(devs)))
-        threading.Thread(target=self._apply_worker, args=(devs, mod),
+        threading.Thread(target=self._apply_all_worker, args=(groups,),
                          daemon=True).start()
 
     def _try_rollback(self, sess, mod, targets: list
@@ -2304,9 +2338,18 @@ class App(tk.Tk):
                 fail += 1
             finally:
                 sess.close()
-        self.msg_queue.put(("vuln_apply_done",
-                            {"ok": ok, "rb": rb, "fail": fail,
-                             "skip": skip}))
+        return {"ok": ok, "rb": rb, "fail": fail, "skip": skip}
+
+    def _apply_all_worker(self, groups: list[tuple[list, object]]):
+        """Run apply per provider group, sequentially; a single done."""
+        total = {"ok": 0, "rb": 0, "fail": 0, "skip": 0}
+        for devs, mod in groups:
+            if self._vuln_stop.is_set():
+                break
+            stats = self._apply_worker(devs, mod)
+            for key in total:
+                total[key] += stats.get(key, 0)
+        self.msg_queue.put(("vuln_apply_done", total))
 
     def _finish_apply_done(self, stats: dict):
         self._vuln_applying = False
