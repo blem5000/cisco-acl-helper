@@ -19,6 +19,7 @@ import crypto_store
 import dhcp_check
 import track
 import updater
+import vuln_telnet
 from i18n import STRINGS, VALID_LANGS
 from version import __version__ as APP_VERSION
 
@@ -327,6 +328,10 @@ class App(tk.Tk):
         self._audit_host = ""
         self._audit_proposal = ""
         self._audit_fetching = False
+        self._vuln_fetching = False
+        self.vuln_results: list[tuple] = []  # (host, result_dict|None, err|None)
+        self.vuln_proposal = ""
+        self._vuln_stop = threading.Event()
         self._vlan_fetching = False
         self.last_results: list[tuple] = []  # (host, found_dict, err|None)
         self.last_ip: str = ""
@@ -703,6 +708,97 @@ class App(tk.Tk):
         prop_fr.grid_rowconfigure(0, weight=1)
         prop_fr.grid_columnconfigure(0, weight=1)
 
+        # --- Tab: vulnerabilities (check config, propose fix, apply later) ---
+        self.tab_vuln = ttk.Frame(self.nb)
+        self.nb.add(self.tab_vuln, text="vuln")
+        vf = ttk.Frame(self.tab_vuln)
+        vf.pack(fill="x", padx=10, pady=10)
+        self.lbl_vuln_dev = ttk.Label(vf, text="")
+        self.lbl_vuln_dev.grid(row=0, column=0, sticky="w")
+        self.lbl_vuln_name = ttk.Label(vf, text="")
+        self.lbl_vuln_name.grid(row=0, column=1, sticky="w", padx=(16, 0))
+        dev_list_fr = ttk.Frame(vf)
+        dev_list_fr.grid(row=1, column=0, sticky="w", pady=4)
+        self.vuln_listbox = tk.Listbox(dev_list_fr, selectmode="extended",
+                                       width=30, height=4,
+                                       font=("Consolas", 10),
+                                       exportselection=False)
+        vuln_dev_ys = ttk.Scrollbar(dev_list_fr, orient="vertical",
+                                    command=self.vuln_listbox.yview)
+        self.vuln_listbox.configure(yscrollcommand=vuln_dev_ys.set)
+        self.vuln_listbox.pack(side="left", fill="y")
+        vuln_dev_ys.pack(side="left", fill="y")
+        right_fr = ttk.Frame(vf)
+        right_fr.grid(row=1, column=1, sticky="nw", padx=(16, 0), pady=4)
+        self.vuln_id_var = tk.StringVar(value="")
+        self.combo_vuln = ttk.Combobox(right_fr, textvariable=self.vuln_id_var,
+                                       state="readonly", width=34, values=[])
+        self.combo_vuln.pack(anchor="w")
+        self.combo_vuln.bind("<<ComboboxSelected>>",
+                             lambda _e: self._sync_vuln_desc())
+        self.lbl_vuln_desc = ttk.Label(right_fr, text="", wraplength=420,
+                                       justify="left", foreground="gray")
+        self.lbl_vuln_desc.pack(anchor="w", pady=(6, 0))
+
+        vbtns = ttk.Frame(self.tab_vuln)
+        vbtns.pack(fill="x", padx=10, pady=(0, 8))
+        self.btn_vuln_check = ttk.Button(vbtns, text="",
+                                         command=self.start_vuln_check)
+        self.btn_vuln_check.pack(side="left", padx=(0, 6))
+        self.btn_vuln_stop = ttk.Button(vbtns, text="", command=self.stop_vuln_check,
+                                        state="disabled")
+        self.btn_vuln_stop.pack(side="left", padx=6)
+        self.btn_vuln_copy = ttk.Button(vbtns, text="", command=self.copy_vuln)
+        self.btn_vuln_copy.pack(side="left", padx=6)
+        self.btn_vuln_clear = ttk.Button(vbtns, text="", command=self.clear_vuln)
+        self.btn_vuln_clear.pack(side="left", padx=6)
+        self.btn_vuln_apply = ttk.Button(vbtns, text="", state="disabled")
+        self.btn_vuln_apply.pack(side="left", padx=6)
+        self.btn_vuln_all = ttk.Button(vbtns, text="",
+                                       command=lambda: self.vuln_listbox.select_set(0, tk.END))
+        self.btn_vuln_all.pack(side="left", padx=(18, 2))
+        self.btn_vuln_none = ttk.Button(vbtns, text="",
+                                        command=lambda: self.vuln_listbox.select_clear(0, tk.END))
+        self.btn_vuln_none.pack(side="left", padx=2)
+        self.vuln_prog = ttk.Progressbar(vbtns, mode="determinate", length=120)
+        self.vuln_prog.pack(side="left", padx=(14, 0))
+
+        self.lbl_vuln_results = ttk.Label(self.tab_vuln, text="")
+        self.lbl_vuln_results.pack(anchor="w", padx=10, pady=(2, 2))
+        vuln_fr = ttk.Frame(self.tab_vuln)
+        vuln_fr.pack(fill="both", expand=True, padx=10, pady=(0, 4))
+        self.txt_vuln = tk.Text(vuln_fr, wrap="none", font=("Consolas", 10),
+                                height=8, state="disabled")
+        vuln_ys = ttk.Scrollbar(vuln_fr, orient="vertical",
+                                command=self.txt_vuln.yview)
+        vuln_xs = ttk.Scrollbar(vuln_fr, orient="horizontal",
+                                command=self.txt_vuln.xview)
+        self.txt_vuln.configure(yscrollcommand=vuln_ys.set,
+                                xscrollcommand=vuln_xs.set)
+        self.txt_vuln.grid(row=0, column=0, sticky="nsew")
+        vuln_ys.grid(row=0, column=1, sticky="ns")
+        vuln_xs.grid(row=1, column=0, sticky="ew")
+        vuln_fr.grid_rowconfigure(0, weight=1)
+        vuln_fr.grid_columnconfigure(0, weight=1)
+
+        self.lbl_vuln_prop = ttk.Label(self.tab_vuln, text="")
+        self.lbl_vuln_prop.pack(anchor="w", padx=10, pady=(2, 2))
+        vprop_fr = ttk.Frame(self.tab_vuln)
+        vprop_fr.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        self.txt_vuln_prop = tk.Text(vprop_fr, wrap="none", font=("Consolas", 10),
+                                     height=8, state="disabled")
+        vprop_ys = ttk.Scrollbar(vprop_fr, orient="vertical",
+                                 command=self.txt_vuln_prop.yview)
+        vprop_xs = ttk.Scrollbar(vprop_fr, orient="horizontal",
+                                 command=self.txt_vuln_prop.xview)
+        self.txt_vuln_prop.configure(yscrollcommand=vprop_ys.set,
+                                     xscrollcommand=vprop_xs.set)
+        self.txt_vuln_prop.grid(row=0, column=0, sticky="nsew")
+        vprop_ys.grid(row=0, column=1, sticky="ns")
+        vprop_xs.grid(row=1, column=0, sticky="ew")
+        vprop_fr.grid_rowconfigure(0, weight=1)
+        vprop_fr.grid_columnconfigure(0, weight=1)
+
         # --- Tab 5: settings ---
         self.tab_set = ttk.Frame(self.nb)
         self.nb.add(self.tab_set, text="settings")
@@ -746,12 +842,12 @@ class App(tk.Tk):
             self.tab_set, text="", command=lambda: self.check_for_updates(manual=True))
         self.btn_upd_check.pack(anchor="w", padx=14, pady=(8, 0))
 
-        # tab order: search, generator, tracking, audit, devices, subnets, settings
+        # tab order: search, generator, tracking, audit, vuln, devices, subnets, settings
         for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_audit,
-                      self.tab_dev, self.tab_sub, self.tab_set):
+                      self.tab_vuln, self.tab_dev, self.tab_sub, self.tab_set):
             self.nb.forget(_tab)
         for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_audit,
-                      self.tab_dev, self.tab_sub, self.tab_set):
+                      self.tab_vuln, self.tab_dev, self.tab_sub, self.tab_set):
             self.nb.add(_tab, text="")
 
         # status bar + small version stamp on the right
@@ -774,6 +870,7 @@ class App(tk.Tk):
         self.nb.tab(self.tab_gen, text=S["tab_gen"])
         self.nb.tab(self.tab_track, text=S["tab_track"])
         self.nb.tab(self.tab_audit, text=S["tab_audit"])
+        self.nb.tab(self.tab_vuln, text=S["tab_vuln"])
         self.nb.tab(self.tab_dev, text=S["tab_devices"])
         self.nb.tab(self.tab_sub, text=S["tab_subnets"])
         self.nb.tab(self.tab_gen, text=S["tab_gen"])
@@ -842,6 +939,18 @@ class App(tk.Tk):
         self.btn_audit_clear.configure(text=S["clear_btn"])
         self.lbl_audit_cur.configure(text=S["audit_current_label"])
         self.lbl_audit_prop.configure(text=S["audit_proposal_label"])
+        self.lbl_vuln_dev.configure(text=S["vuln_devices_label"])
+        self.lbl_vuln_name.configure(text=S["vuln_name_label"])
+        self.btn_vuln_check.configure(text=S["vuln_check_btn"])
+        self.btn_vuln_stop.configure(text=S["stop_btn"])
+        self.btn_vuln_copy.configure(text=S["copy_btn"])
+        self.btn_vuln_clear.configure(text=S["clear_btn"])
+        self.btn_vuln_apply.configure(text=S["vuln_apply_btn"])
+        self.btn_vuln_all.configure(text=S["vuln_select_all"])
+        self.btn_vuln_none.configure(text=S["vuln_select_none"])
+        self.lbl_vuln_results.configure(text=S["vuln_results_label"])
+        self.lbl_vuln_prop.configure(text=S["vuln_proposal_label"])
+        self._refresh_vuln_combo()
         self.lbl_lang.configure(text=S["lang_label"])
         self.lbl_master.configure(text=S["master_label"])
         self.btn_chmaster.configure(text=S["change_master_btn"])
@@ -1351,6 +1460,252 @@ class App(tk.Tk):
         self._set_audit_prop("")
         self.lbl_audit_stats.configure(text="")
 
+    # ---------- vulnerabilities tab (telnet first, registry-ready) ----------
+    def _vuln_registry(self) -> list[tuple[str, str, str]]:
+        """Available checks: [(id, display name, description)]."""
+        S = STRINGS[self.lang]
+        return [(vuln_telnet.VULN_ID, S["vuln_telnet_name"],
+                 S["vuln_telnet_desc"])]
+
+    def _refresh_vuln_combo(self):
+        reg = self._vuln_registry()
+        names = [name for _vid, name, _desc in reg]
+        self.combo_vuln.configure(values=names)
+        if self.vuln_id_var.get() not in names:
+            self.vuln_id_var.set(names[0] if names else "")
+        self._sync_vuln_desc()
+
+    def _sync_vuln_desc(self):
+        reg = self._vuln_registry()
+        sel = self.vuln_id_var.get()
+        for _vid, name, desc in reg:
+            if name == sel:
+                self.lbl_vuln_desc.configure(text=desc)
+                return
+        self.lbl_vuln_desc.configure(text="")
+
+    def _selected_vuln_id(self) -> str:
+        reg = self._vuln_registry()
+        sel = self.vuln_id_var.get()
+        for vid, name, _desc in reg:
+            if name == sel:
+                return vid
+        return reg[0][0] if reg else ""
+
+    def _refresh_vuln_devices(self):
+        labels = [self.dev_label(d) for d in self.devices if d.get("host")]
+        try:
+            sel = {self.vuln_listbox.get(i)
+                   for i in self.vuln_listbox.curselection()}
+        except (tk.TclError, AttributeError):
+            sel = set()
+        try:
+            self.vuln_listbox.delete(0, tk.END)
+            for lb in labels:
+                self.vuln_listbox.insert(tk.END, lb)
+            for i, lb in enumerate(labels):
+                if lb in sel:
+                    self.vuln_listbox.select_set(i)
+        except (tk.TclError, AttributeError):
+            pass
+        self._refresh_vuln_combo()
+
+    def _selected_vuln_devices(self) -> list[dict]:
+        try:
+            idxs = list(self.vuln_listbox.curselection())
+        except tk.TclError:
+            return []
+        out = []
+        for i in idxs:
+            try:
+                label = self.vuln_listbox.get(i)
+            except tk.TclError:
+                continue
+            dev = self._lookup_device(label.strip())
+            if dev is not None:
+                out.append(dev)
+        return out
+
+    def _set_vuln_text(self, content: str):
+        self.txt_vuln.configure(state="normal")
+        self.txt_vuln.delete("1.0", tk.END)
+        self.txt_vuln.insert("1.0", content)
+        self.txt_vuln.configure(state="disabled")
+
+    def _append_vuln_text(self, chunk: str):
+        self.txt_vuln.configure(state="normal")
+        self.txt_vuln.insert(tk.END, chunk)
+        self.txt_vuln.see(tk.END)
+        self.txt_vuln.configure(state="disabled")
+
+    def _set_vuln_prop(self, content: str):
+        self.txt_vuln_prop.configure(state="normal")
+        self.txt_vuln_prop.delete("1.0", tk.END)
+        self.txt_vuln_prop.insert("1.0", content)
+        self.txt_vuln_prop.configure(state="disabled")
+
+    def start_vuln_check(self):
+        if self._vuln_fetching:
+            return
+        if not self._require_unlocked():
+            return
+        devs = self._selected_vuln_devices()
+        if not devs:
+            messagebox.showwarning("ACL", self.T("vuln_need_dev"))
+            return
+        if not self.devices:
+            messagebox.showwarning("ACL", self.T("status_no_devices"))
+            return
+        vuln_id = self._selected_vuln_id()
+        if vuln_id != vuln_telnet.VULN_ID:
+            return
+        self.vuln_results = []
+        self.vuln_proposal = ""
+        self._set_vuln_text("")
+        self._set_vuln_prop("")
+        self._vuln_fetching = True
+        self._vuln_stop.clear()
+        self.btn_vuln_check.configure(state="disabled")
+        self.btn_vuln_stop.configure(state="normal")
+        self.vuln_prog.configure(maximum=len(devs), value=0)
+        self.status.set(self.T("status_searching").format(n=len(devs)))
+        snapshot = [dict(d) for d in devs]
+        threading.Thread(target=self._vuln_worker, args=(snapshot,),
+                         daemon=True).start()
+
+    def stop_vuln_check(self):
+        self._vuln_stop.set()
+
+    def _vuln_worker(self, devs: list[dict]):
+        for d in devs:
+            if self._vuln_stop.is_set():
+                break
+            host = d.get("host", "?")
+            try:
+                out = cisco_ssh.run_commands(
+                    host, d["username"], d.get("password", ""),
+                    d.get("enable") or None, int(d.get("port", 22)),
+                    timeout=15, commands=vuln_telnet.TELNET_COMMANDS,
+                    debug_log=self._ssh_debug_log())
+                res = vuln_telnet.analyze_telnet(
+                    out.get(vuln_telnet.TELNET_COMMANDS[0], ""),
+                    out.get(vuln_telnet.TELNET_COMMANDS[2], ""),
+                    out.get(vuln_telnet.TELNET_COMMANDS[1], ""))
+                self.msg_queue.put(("vuln_chunk", (host, res, None)))
+            except Exception as e:
+                self.msg_queue.put(("vuln_chunk", (host, None, str(e))))
+        self.msg_queue.put(("vuln_done", None))
+
+    def _finish_vuln_chunk(self, host: str, res: dict | None, err: str | None):
+        self.vuln_results.append((host, res, err))
+        if err:
+            chunk = (self.T("device_hdr").format(host=host) + "\n"
+                     + self.T("vuln_fetch_fail").format(host=host, err=err) + "\n")
+        else:
+            chunk = self._format_vuln_result(host, res or {})
+        if not self.txt_vuln.get("1.0", tk.END).strip():
+            self._set_vuln_text(chunk.rstrip() + "\n")
+        else:
+            self._append_vuln_text(chunk.rstrip() + "\n")
+        try:
+            total = int(self.vuln_prog.cget("maximum") or 0)
+            self.vuln_prog.configure(value=len(self.vuln_results))
+            if total:
+                self.status.set(self.T("status_progress").format(
+                    done=len(self.vuln_results), total=total))
+        except tk.TclError:
+            pass
+        self._rebuild_vuln_proposal()
+
+    def _format_vuln_result(self, host: str, res: dict) -> str:
+        lines = [self.T("device_hdr").format(host=host)]
+        vty = res.get("vty", [])
+        if not vty:
+            lines.append(self.T("vuln_no_vty"))
+        else:
+            for e in vty:
+                val = e.get("transport") or "(missing)"
+                mark = "OK " if e.get("compliant") else "FAIL"
+                lines.append(f"[{mark}] {e.get('header')}: "
+                             f"transport input {val}")
+            for e in res.get("con_aux", []):
+                if e.get("status") == "vulnerable":
+                    lines.append(f"[WARN] {e.get('header')}: "
+                                 f"transport input {e.get('transport')}")
+        if res.get("compliant"):
+            lines.append(self.T("vuln_ok"))
+        else:
+            lines.append(self.T("vuln_bad"))
+        if res.get("ssh_enabled") is False:
+            lines.append(self.T("vuln_warn_ssh"))
+        for e in vty:
+            if e.get("status") == "blocked":
+                lines.append(self.T("vuln_warn_blocked").format(
+                    header=e.get("header")))
+        return "\n".join(lines) + "\n"
+
+    def _rebuild_vuln_proposal(self):
+        """Combined paste-ready fix, per-device sections as '! ' comments."""
+        parts: list[str] = []
+        for host, res, err in self.vuln_results:
+            if err or not res:
+                continue
+            prop = (res.get("proposal") or "").strip()
+            if res.get("compliant") or not prop:
+                continue
+            parts.append(f"! ==== {host} ====")
+            if res.get("ssh_enabled") is False:
+                parts.append(f"! {self.T('vuln_warn_ssh')}")
+            parts.append(prop)
+        self.vuln_proposal = ("\n".join(parts) + "\n") if parts else ""
+        if self.vuln_proposal:
+            self._set_vuln_prop(self.vuln_proposal)
+            return
+        good = [(h, r, e) for h, r, e in self.vuln_results if not e and r]
+        if good and all(r.get("compliant") for _h, r, _e in good):
+            self._set_vuln_prop(self.T("vuln_no_proposal") + "\n")
+        elif any(not r.get("compliant") and not (r.get("proposal") or "").strip()
+                 for _h, r, _e in good):
+            self._set_vuln_prop(self.T("vuln_manual_inspect") + "\n")
+        else:
+            self._set_vuln_prop("")
+
+    def _finish_vuln_done(self):
+        self._vuln_fetching = False
+        try:
+            self.btn_vuln_check.configure(state="normal")
+            self.btn_vuln_stop.configure(state="disabled")
+            self.vuln_prog.configure(value=len(self.vuln_results))
+        except tk.TclError:
+            pass
+        ok = sum(1 for _h, r, e in self.vuln_results
+                 if not e and r and r.get("compliant"))
+        bad = sum(1 for _h, r, e in self.vuln_results
+                  if not e and r and not r.get("compliant"))
+        errs = sum(1 for _h, _r, e in self.vuln_results if e)
+        stopped = self._vuln_stop.is_set()
+        base = self.T("vuln_summary").format(n=len(self.vuln_results),
+                                             ok=ok, bad=bad, err=errs)
+        self.status.set(base + (" " + self.T("vuln_stopped") if stopped else ""))
+
+    def copy_vuln(self):
+        if not self.vuln_proposal.strip():
+            messagebox.showinfo("ACL", self.T("nothing_to_copy"))
+            return
+        self.clipboard_clear()
+        self.clipboard_append(self.vuln_proposal)
+        self._toast(self.T("copied"))
+
+    def clear_vuln(self):
+        self.vuln_results = []
+        self.vuln_proposal = ""
+        self._set_vuln_text("")
+        self._set_vuln_prop("")
+        try:
+            self.vuln_prog.configure(value=0)
+        except tk.TclError:
+            pass
+
     # ---------- devices tab actions ----------
     def _selected_device_idx(self) -> int | None:
         sel = self.tree.selection()
@@ -1843,6 +2198,7 @@ class App(tk.Tk):
         if self.sub_dev_var.get() not in labels:
             cur = self._lookup_device(self.sub_dev_var.get().strip())
             self.sub_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
+        self._refresh_vuln_devices()
 
     # ---------- IP tracking tab (ARP -> MAC -> port -> CDP) ----------
     def _set_track_text(self, content: str):
@@ -2296,6 +2652,11 @@ class App(tk.Tk):
                     self.status.set(self.T("status_ready"))
                     messagebox.showerror(
                         "ACL", self.T("gen_fetch_fail").format(host=host, err=err))
+                elif kind == "vuln_chunk":
+                    host, res, err = payload
+                    self._finish_vuln_chunk(host, res, err)
+                elif kind == "vuln_done":
+                    self._finish_vuln_done()
                 elif kind == "gen_done":
                     (pc, host, grouped, do_in, do_out, fetch_key, taken, err,
                      dhcp_status, dhcp_detail, owner, aces, group) = payload
