@@ -422,6 +422,8 @@ class App(tk.Tk):
         self._vuln_stop = threading.Event()
         self._vlan_fetching = False
         self.last_results: list[tuple] = []  # (host, found_dict, err|None)
+        self._dev_sort: tuple | None = None  # (column, reverse)
+        self._sub_sort: tuple | None = None  # (column, reverse)
         self.last_ip: str = ""
         self.searching = False
         self.stop_event = threading.Event()
@@ -531,10 +533,16 @@ class App(tk.Tk):
         self.nb.add(self.tab_dev, text="devices")
         self.lbl_dev = ttk.Label(self.tab_dev, text="")
         self.lbl_dev.pack(anchor="w", padx=10, pady=(10, 4))
-        cols = ("hostname", "host", "user", "port")
+        cols = ("audit", "hostname", "host", "user", "port")
         self.tree = ttk.Treeview(self.tab_dev, columns=cols, show="headings", height=14)
         self.tree.pack(fill="both", expand=True, padx=10)
         self.tree.bind("<Double-1>", lambda _e: self.edit_device())
+        self.tree.bind("<ButtonRelease-1>", self._on_dev_click)
+        self.tree.bind("<space>", self._on_dev_space)
+        self.tree.column("audit", width=44, minwidth=44, stretch=False, anchor="center")
+        self.tree.heading("audit", text="\u2713", command=self.toggle_all_audit)
+        for _c in ("hostname", "host", "user", "port"):
+            self.tree.heading(_c, command=lambda c=_c: self.sort_devices(c))
         dbtns = ttk.Frame(self.tab_dev)
         dbtns.pack(fill="x", padx=10, pady=10)
         self.btn_add = ttk.Button(dbtns, text="", command=self.add_device)
@@ -571,6 +579,8 @@ class App(tk.Tk):
         self.subtree = ttk.Treeview(self.tab_sub, columns=subcols, show="headings", height=14)
         self.subtree.pack(fill="both", expand=True, padx=10)
         self.subtree.bind("<Double-1>", lambda _e: self.edit_subnet())
+        for _c in subcols:
+            self.subtree.heading(_c, command=lambda c=_c: self.sort_subnets(c))
         sbtns = ttk.Frame(self.tab_sub)
         sbtns.pack(fill="x", padx=10, pady=10)
         self.btn_sub_add = ttk.Button(sbtns, text="", command=self.add_subnet)
@@ -810,7 +820,7 @@ class App(tk.Tk):
         dev_list_fr = ttk.Frame(vf)
         dev_list_fr.grid(row=1, column=0, sticky="w", pady=4)
         self.vuln_listbox = tk.Listbox(dev_list_fr, selectmode="extended",
-                                       width=30, height=4,
+                                       width=38, height=8,
                                        font=("Consolas", 10),
                                        exportselection=False)
         vuln_dev_ys = ttk.Scrollbar(dev_list_fr, orient="vertical",
@@ -850,6 +860,9 @@ class App(tk.Tk):
         self.btn_vuln_none = ttk.Button(vbtns, text="",
                                         command=lambda: self.vuln_listbox.select_clear(0, tk.END))
         self.btn_vuln_none.pack(side="left", padx=2)
+        self.btn_vuln_marked = ttk.Button(vbtns, text="",
+                                          command=self.vuln_select_marked)
+        self.btn_vuln_marked.pack(side="left", padx=2)
         self.vuln_prog = ttk.Progressbar(vbtns, mode="determinate", length=120)
         self.vuln_prog.pack(side="left", padx=(14, 0))
 
@@ -1042,6 +1055,7 @@ class App(tk.Tk):
         self.btn_vuln_apply.configure(text=S["vuln_apply_btn"])
         self.btn_vuln_all.configure(text=S["vuln_select_all"])
         self.btn_vuln_none.configure(text=S["vuln_select_none"])
+        self.btn_vuln_marked.configure(text=S["vuln_marked_btn"])
         self.lbl_vuln_results.configure(text=S["vuln_results_label"])
         self.lbl_vuln_prop.configure(text=S["vuln_proposal_label"])
         self._refresh_vuln_combo()
@@ -1424,12 +1438,91 @@ class App(tk.Tk):
                                     {"devices": self.devices,
                                      "subnets": self.subnets}, self.master_pw)
 
+    @staticmethod
+    def _host_key(host: str) -> tuple:
+        """Sort key: real IPs numerically (10.0.0.9 < 10.0.0.10), then names."""
+        h = (host or "").strip()
+        try:
+            return (0, int(ipaddress.ip_address(h)), "")
+        except ValueError:
+            return (1, 0, h.lower())
+
+    @staticmethod
+    def _subnet_key(subnet: str) -> tuple:
+        try:
+            net = ipaddress.ip_network((subnet or "").strip(), strict=False)
+            return (0, int(net.network_address), net.prefixlen, "")
+        except ValueError:
+            return (1, 0, 0, (subnet or "").lower())
+
+    def sort_devices(self, col: str):
+        """Sort the device list by column click; toggles direction."""
+        if self._dev_sort and self._dev_sort[0] == col:
+            reverse = not self._dev_sort[1]
+        else:
+            reverse = False
+        keys = {
+            "hostname": lambda d: (d.get("hostname", "") or "").lower(),
+            "host": lambda d: self._host_key(d.get("host", "")),
+            "user": lambda d: (d.get("username", "") or "").lower(),
+            "port": lambda d: (int(d.get("port", 22) or 22)
+                               if str(d.get("port", 22)).strip().isdigit()
+                               else 10 ** 9),
+        }
+        self.devices.sort(key=keys.get(col, keys["host"]), reverse=reverse)
+        self._dev_sort = (col, reverse)
+        self.persist_store()
+        self.refresh_tree()
+
+    def sort_subnets(self, col: str):
+        if self._sub_sort and self._sub_sort[0] == col:
+            reverse = not self._sub_sort[1]
+        else:
+            reverse = False
+        keys = {
+            "subnet": lambda s: self._subnet_key(s.get("subnet", "")),
+            "acl_in": lambda s: (s.get("acl_in", "") or "").lower(),
+            "acl_out": lambda s: (s.get("acl_out", "") or "").lower(),
+        }
+        self.subnets.sort(key=keys.get(col, keys["subnet"]), reverse=reverse)
+        self._sub_sort = (col, reverse)
+        self.persist_store()
+        self.refresh_subnets()
+
+    def _update_sort_headers(self):
+        """Arrow (asc/desc) on the sorted column; plain text otherwise."""
+        dev_heads = {"hostname": self.T("col_hostname"), "host": self.T("col_host"),
+                     "user": self.T("col_user"), "port": self.T("col_port")}
+        for col, base in dev_heads.items():
+            try:
+                if self._dev_sort and self._dev_sort[0] == col:
+                    arrow = " \u25bc" if self._dev_sort[1] else " \u25b2"
+                    self.tree.heading(col, text=base + arrow)
+                else:
+                    self.tree.heading(col, text=base)
+            except tk.TclError:
+                pass
+        sub_heads = {"subnet": self.T("col_subnet"),
+                     "acl_in": self.T("col_acl_in"),
+                     "acl_out": self.T("col_acl_out")}
+        for col, base in sub_heads.items():
+            try:
+                if self._sub_sort and self._sub_sort[0] == col:
+                    arrow = " \u25bc" if self._sub_sort[1] else " \u25b2"
+                    self.subtree.heading(col, text=base + arrow)
+                else:
+                    self.subtree.heading(col, text=base)
+            except tk.TclError:
+                pass
+
     def refresh_tree(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
         for d in self.devices:
-            self.tree.insert("", "end", values=(d.get("hostname", ""), d.get("host", ""),
+            mark = "\u2611" if d.get("audit", True) else "\u2610"
+            self.tree.insert("", "end", values=(mark, d.get("hostname", ""), d.get("host", ""),
                                                 d.get("username", ""), d.get("port", 22)))
+        self._update_sort_headers()
         self._refresh_gen_devices()
 
     def refresh_subnets(self):
@@ -1439,6 +1532,7 @@ class App(tk.Tk):
             n = acl_parser.normalize_subnet(s)
             self.subtree.insert("", "end",
                                 values=(n["subnet"], n["acl_in"], n["acl_out"]))
+        self._update_sort_headers()
 
     # ---------- audit tab ----------
     def _set_audit_cur(self, content: str):
@@ -1603,6 +1697,21 @@ class App(tk.Tk):
         except (tk.TclError, AttributeError):
             pass
         self._refresh_vuln_combo()
+
+    def vuln_select_marked(self):
+        """Select rows of devices marked ✓ on the Devices tab."""
+        try:
+            self.vuln_listbox.select_clear(0, tk.END)
+            for i in range(self.vuln_listbox.size()):
+                try:
+                    label = self.vuln_listbox.get(i)
+                except tk.TclError:
+                    continue
+                dev = self._lookup_device(label.strip())
+                if dev is not None and dev.get("audit", True):
+                    self.vuln_listbox.select_set(i)
+        except tk.TclError:
+            pass
 
     def _selected_vuln_devices(self) -> list[dict]:
         try:
@@ -1834,6 +1943,60 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
+    def _toggle_audit_at(self, idx: int):
+        """Flip the audit flag of one device (devices-tab checkbox column)."""
+        if 0 <= idx < len(self.devices):
+            d = self.devices[idx]
+            d["audit"] = not d.get("audit", True)
+            self.persist_store()
+            self.refresh_tree()
+
+    def _on_dev_click(self, event):
+        """Single click on the ✓ column toggles audit marking for that row."""
+        try:
+            if self.tree.identify("region", event.x, event.y) != "cell":
+                return
+            if self.tree.identify_column(event.x, event.y) != "#1":
+                return
+            row = self.tree.identify_row(event.y)
+            if not row:
+                return
+            self._toggle_audit_at(self.tree.index(row))
+        except tk.TclError:
+            pass
+
+    def _on_dev_space(self, _event):
+        """Space toggles audit marking for all currently selected rows."""
+        sel = self.tree.selection()
+        if not sel:
+            return "break"
+        idxs = sorted(self.tree.index(r) for r in sel)
+        vals = [bool(self.devices[i].get("audit", True)) for i in idxs
+                if 0 <= i < len(self.devices)]
+        target = not all(vals) if vals else True
+        for i in idxs:
+            if 0 <= i < len(self.devices):
+                self.devices[i]["audit"] = target
+        self.persist_store()
+        self.refresh_tree()
+        # re-select the same rows (refresh rebuilds the tree)
+        try:
+            kids = self.tree.get_children()
+            for i in idxs:
+                if i < len(kids):
+                    self.tree.selection_add(kids[i])
+        except tk.TclError:
+            pass
+        return "break"
+
+    def toggle_all_audit(self):
+        """Header ✓ click: mark all when any is unmarked, else clear all."""
+        target = not all(d.get("audit", True) for d in self.devices)
+        for d in self.devices:
+            d["audit"] = target
+        self.persist_store()
+        self.refresh_tree()
+
     # ---------- devices tab actions ----------
     def _selected_device_idx(self) -> int | None:
         sel = self.tree.selection()
@@ -1860,6 +2023,7 @@ class App(tk.Tk):
         dlg = DeviceDialog(self, self.lang, self.T("dlg_edit_title"), self.devices[idx])
         self.wait_window(dlg)
         if dlg.result:
+            dlg.result["audit"] = self.devices[idx].get("audit", True)
             self.devices[idx] = dlg.result
             self.persist_store()
             self.refresh_tree()
