@@ -43,12 +43,19 @@ import re
 __all__ = [
     "VULN_ID",
     "TELNET_COMMANDS",
+    "CHECK_COMMANDS",
     "analyze_telnet",
     "build_proposal_script",
     "apply_targets",
     "needs_apply",
     "build_fix_commands",
     "build_rollback_commands",
+    "fix_verified",
+    "rollback_verified",
+    "fetch_check_run",
+    "fetch_check_session",
+    "format_result",
+    "verify_prompt",
 ]
 
 VULN_ID = "telnet"
@@ -59,6 +66,9 @@ TELNET_COMMANDS = [
     "show running-config | include transport input|ip ssh|telnet",
     "show ip ssh",
 ]
+
+#: Provider alias used by the generic check/apply workers in app.py.
+CHECK_COMMANDS = TELNET_COMMANDS
 
 _LINE_HDR = re.compile(r"^line\s+(vty|con|aux)\s+(.+?)\s*$", re.IGNORECASE)
 _TRANSPORT = re.compile(r"^transport\s+input\s+(.+?)\s*$", re.IGNORECASE)
@@ -195,6 +205,7 @@ def analyze_telnet(line_section: str = "",
         compliant = False
 
     return {
+        "vuln": "telnet",
         "compliant": compliant,
         "ssh_enabled": ssh,
         "vty": vty,
@@ -251,7 +262,30 @@ def needs_apply(result: dict | None) -> bool:
     return bool(apply_targets(result))
 
 
-def build_fix_commands(targets: list[dict]) -> list[str]:
+def apply_targets(result: dict) -> list[dict]:
+    """Vty entries the automatic fix will touch (non-compliant, not blocked)."""
+    if (result or {}).get("vuln", "telnet") != "telnet":
+        return []
+    return [e for e in (result or {}).get("vty", [])
+            if not e.get("compliant") and e.get("status") != "blocked"]
+
+
+def needs_apply(result: dict | None) -> bool:
+    """True when a device has an auto-appliable Telnet fix.
+
+    Refuses when SSH itself looks disabled (applying ssh-only transport
+    then would lock out remote access).
+    """
+    if ((result or {}).get("vuln", "telnet") != "telnet"
+            or not result or result.get("compliant")):
+        return False
+    if result.get("ssh_enabled") is False:
+        return False
+    return bool(apply_targets(result))
+
+
+def build_fix_commands(targets: list[dict], result: dict | None = None
+                       ) -> list[str]:
     """Raw sub-commands for a config session (no conf t / end / wr)."""
     cmds: list[str] = []
     for rng in _unique_ranges(targets, include_blocked=False):
@@ -260,7 +294,8 @@ def build_fix_commands(targets: list[dict]) -> list[str]:
     return cmds
 
 
-def build_rollback_commands(targets: list[dict]) -> list[str]:
+def build_rollback_commands(targets: list[dict], result: dict | None = None
+                            ) -> list[str]:
     """Restore the ORIGINAL transport inputs captured before the fix."""
     cmds: list[str] = []
     seen: set[str] = set()
@@ -273,3 +308,80 @@ def build_rollback_commands(targets: list[dict]) -> list[str]:
         orig = (e.get("transport") or "").strip()
         cmds.append(f"transport input {orig}" if orig else "no transport input")
     return cmds
+
+
+def fix_verified(result: dict, targets: list[dict]) -> bool:
+    """True when the fresh result shows the Telnet issue gone."""
+    return (bool(result) and result.get("vuln", "telnet") == "telnet"
+            and bool(result.get("compliant")))
+
+
+def rollback_verified(targets: list[dict], after: dict) -> bool:
+    """True when vty transports match the pre-fix snapshot again."""
+    if not targets or not after or after.get("vuln", "telnet") != "telnet":
+        return False
+    want = {(e.get("range") or ""): (e.get("transport") or "")
+            for e in targets}
+    got = {(e.get("range") or ""): (e.get("transport") or "")
+           for e in after.get("vty", [])}
+    return bool(want) and all(got.get(r) == t for r, t in want.items())
+
+
+def fetch_check_run(host: str, username: str, password: str,
+                    enable: str | None = None, port: int = 22,
+                    debug_log: str | None = None) -> dict:
+    """Fetch ACL-section config over a throwaway session, analyzed."""
+    import cisco_ssh
+
+    out = cisco_ssh.run_commands(
+        host, username, password, enable, port,
+        timeout=15, commands=CHECK_COMMANDS, debug_log=debug_log)
+    return analyze_telnet(out.get(CHECK_COMMANDS[0], ""),
+                          out.get(CHECK_COMMANDS[2], ""),
+                          out.get(CHECK_COMMANDS[1], ""))
+
+
+def fetch_check_session(sess) -> dict:
+    """Same, reusing an open ConfigSession."""
+    out = {cmd: sess.exec(cmd, 2.5) for cmd in CHECK_COMMANDS}
+    return analyze_telnet(out[CHECK_COMMANDS[0]],
+                          out[CHECK_COMMANDS[2]],
+                          out[CHECK_COMMANDS[1]])
+
+
+def format_result(host: str, result: dict, T) -> list[tuple[str, str | None]]:
+    """Per-device Telnet findings as (line, tag) segments, colored display."""
+    segs = [(T("device_hdr").format(host=host) + "\n", None)]
+    vty = result.get("vty", [])
+    if not vty:
+        segs.append((T("vuln_no_vty") + "\n", "vuln_warn"))
+    else:
+        for e in vty:
+            val = e.get("transport") or "(missing)"
+            if e.get("compliant"):
+                mark, tag = "OK ", "vuln_ok"
+            else:
+                mark, tag = "FAIL", "vuln_fail"
+            segs.append((f"[{mark}] {e.get('header')}: "
+                         f"transport input {val}\n", tag))
+        for e in result.get("con_aux", []):
+            if e.get("status") == "vulnerable":
+                segs.append((f"[WARN] {e.get('header')}: "
+                             f"transport input {e.get('transport')}\n",
+                             "vuln_warn"))
+    if result.get("compliant"):
+        segs.append((T("vuln_ok") + "\n", "vuln_ok"))
+    else:
+        segs.append((T("vuln_bad") + "\n", "vuln_fail"))
+    if result.get("ssh_enabled") is False:
+        segs.append((T("vuln_warn_ssh") + "\n", "vuln_warn"))
+    for e in vty:
+        if e.get("status") == "blocked":
+            segs.append((T("vuln_warn_blocked").format(
+                header=e.get("header")) + "\n", "vuln_warn"))
+    return segs
+
+
+def verify_prompt(host: str, T) -> tuple[str, str]:
+    return (T("vuln_verify_title").format(host=host),
+            T("vuln_verify_msg").format(host=host))

@@ -22,9 +22,14 @@ import device_import
 import dhcp_check
 import track
 import updater
+import vuln_ssh
 import vuln_telnet
 from i18n import STRINGS, VALID_LANGS
 from version import __version__ as APP_VERSION
+
+
+#: Vulnerability providers behind the shared check/apply workers.
+VULN_MODS = {"telnet": vuln_telnet, "ssh": vuln_ssh}
 
 
 def app_dir() -> str:
@@ -1692,7 +1697,13 @@ class App(tk.Tk):
         """Available checks: [(id, display name, description)]."""
         S = STRINGS[self.lang]
         return [(vuln_telnet.VULN_ID, S["vuln_telnet_name"],
-                 S["vuln_telnet_desc"])]
+                 S["vuln_telnet_desc"]),
+                (vuln_ssh.VULN_ID, S["vuln_ssh_name"],
+                 S["vuln_ssh_desc"])]
+
+    @staticmethod
+    def _vuln_mod(vuln_id: str):
+        return VULN_MODS.get(vuln_id, vuln_telnet)
 
     def _refresh_vuln_combo(self):
         reg = self._vuln_registry()
@@ -1818,8 +1829,7 @@ class App(tk.Tk):
             messagebox.showwarning("ACL", self.T("status_no_devices"))
             return
         vuln_id = self._selected_vuln_id()
-        if vuln_id != vuln_telnet.VULN_ID:
-            return
+        mod = self._vuln_mod(vuln_id)
         self.vuln_results = []
         self.vuln_proposal = ""
         self._set_vuln_text("")
@@ -1835,26 +1845,21 @@ class App(tk.Tk):
         self.vuln_prog.start(12)
         self.status.set(self.T("status_searching").format(n=len(devs)))
         snapshot = [dict(d) for d in devs]
-        threading.Thread(target=self._vuln_worker, args=(snapshot,),
+        threading.Thread(target=self._vuln_worker, args=(snapshot, mod),
                          daemon=True).start()
 
     def stop_vuln_check(self):
         self._vuln_stop.set()
 
-    def _vuln_worker(self, devs: list[dict]):
+    def _vuln_worker(self, devs: list[dict], mod):
         """Check all selected switches in parallel (up to 5 SSH sessions)."""
         def one_device(d: dict):
             host = d.get("host", "?")
             try:
-                out = cisco_ssh.run_commands(
+                res = mod.fetch_check_run(
                     host, d["username"], d.get("password", ""),
                     d.get("enable") or None, int(d.get("port", 22)),
-                    timeout=15, commands=vuln_telnet.TELNET_COMMANDS,
                     debug_log=self._ssh_debug_log())
-                res = vuln_telnet.analyze_telnet(
-                    out.get(vuln_telnet.TELNET_COMMANDS[0], ""),
-                    out.get(vuln_telnet.TELNET_COMMANDS[2], ""),
-                    out.get(vuln_telnet.TELNET_COMMANDS[1], ""))
                 return (host, res, None)
             except Exception as e:
                 return (host, None, str(e))
@@ -1882,7 +1887,8 @@ class App(tk.Tk):
                     (self.T("vuln_fetch_fail").format(host=host, err=err)
                      + "\n", "vuln_fail")]
         else:
-            segs = self._format_vuln_result(host, res or {})
+            mod = self._vuln_mod((res or {}).get("vuln", "telnet"))
+            segs = mod.format_result(host, res or {}, self.T)
         empty = not self.txt_vuln.get("1.0", tk.END).strip()
         self._insert_vuln_segments(segs, clear=empty)
         try:
@@ -1893,39 +1899,6 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         self._rebuild_vuln_proposal()
-
-    def _format_vuln_result(self, host: str, res: dict
-                            ) -> list[tuple[str, str | None]]:
-        """Per-device findings as (line, tag) segments for colored display."""
-        segs = [(self.T("device_hdr").format(host=host) + "\n", None)]
-        vty = res.get("vty", [])
-        if not vty:
-            segs.append((self.T("vuln_no_vty") + "\n", "vuln_warn"))
-        else:
-            for e in vty:
-                val = e.get("transport") or "(missing)"
-                if e.get("compliant"):
-                    mark, tag = "OK ", "vuln_ok"
-                else:
-                    mark, tag = "FAIL", "vuln_fail"
-                segs.append((f"[{mark}] {e.get('header')}: "
-                             f"transport input {val}\n", tag))
-            for e in res.get("con_aux", []):
-                if e.get("status") == "vulnerable":
-                    segs.append((f"[WARN] {e.get('header')}: "
-                                 f"transport input {e.get('transport')}\n",
-                                 "vuln_warn"))
-        if res.get("compliant"):
-            segs.append((self.T("vuln_ok") + "\n", "vuln_ok"))
-        else:
-            segs.append((self.T("vuln_bad") + "\n", "vuln_fail"))
-        if res.get("ssh_enabled") is False:
-            segs.append((self.T("vuln_warn_ssh") + "\n", "vuln_warn"))
-        for e in vty:
-            if e.get("status") == "blocked":
-                segs.append((self.T("vuln_warn_blocked").format(
-                    header=e.get("header")) + "\n", "vuln_warn"))
-        return segs
 
     def _rebuild_vuln_proposal(self):
         """Combined paste-ready fix, per-device sections as '! ' comments."""
@@ -2013,7 +1986,9 @@ class App(tk.Tk):
         if not self._require_unlocked():
             return
         cands = [(h, r) for h, r, e in self.vuln_results
-                 if not e and r and vuln_telnet.needs_apply(r)]
+                 if not e and r]
+        mod = self._vuln_mod(self._selected_vuln_id())
+        cands = [(h, r) for h, r in cands if mod.needs_apply(r)]
         if not cands:
             messagebox.showinfo("ACL", self.T("vuln_apply_none"))
             return
@@ -2039,36 +2014,27 @@ class App(tk.Tk):
                                  style="VulnWork.Horizontal.TProgressbar")
         self.vuln_prog.start(12)
         self.status.set(self.T("vuln_apply_status").format(n=len(devs)))
-        threading.Thread(target=self._apply_worker, args=(devs,),
+        threading.Thread(target=self._apply_worker, args=(devs, mod),
                          daemon=True).start()
 
-    @staticmethod
-    def _analyze_session(sess) -> dict:
-        out = {cmd: sess.exec(cmd, 2.5) for cmd in vuln_telnet.TELNET_COMMANDS}
-        return vuln_telnet.analyze_telnet(
-            out[vuln_telnet.TELNET_COMMANDS[0]],
-            out[vuln_telnet.TELNET_COMMANDS[2]],
-            out[vuln_telnet.TELNET_COMMANDS[1]])
-
-    def _try_rollback(self, sess, changed: list[dict]) -> bool:
-        """Restore original transports; True only if verified in config."""
-        if not changed or not sess.alive():
+    def _try_rollback(self, sess, mod, targets: list) -> bool:
+        """Restore pre-fix state; True only if verified afterwards."""
+        if not targets or not sess.alive():
             return False
         try:
-            sess.configure(vuln_telnet.build_rollback_commands(changed))
-            res = self._analyze_session(sess)
+            sess.configure(mod.build_rollback_commands(targets))
+            fresh = mod.fetch_check_session(sess)
         except Exception:
             return False
-        want = {(e.get("range") or ""): (e.get("transport") or "")
-                for e in changed}
-        got = {(e.get("range") or ""): (e.get("transport") or "")
-               for e in res.get("vty", [])}
-        return bool(want) and all(got.get(r) == t for r, t in want.items())
+        try:
+            return bool(mod.rollback_verified(targets, fresh))
+        except Exception:
+            return False
 
     def _put_apply(self, lines: list[tuple[str, str | None]]):
         self.msg_queue.put(("vuln_apply_chunk", lines))
 
-    def _apply_worker(self, devs: list[dict]):
+    def _apply_worker(self, devs: list[dict], mod):
         ok = rb = fail = skip = 0
         for d in devs:
             if self._vuln_stop.is_set():
@@ -2088,7 +2054,7 @@ class App(tk.Tk):
                             + "\n", None)])
                 sess.open()
                 sess.ensure_privileged()
-                res = self._analyze_session(sess)
+                res = mod.fetch_check_session(sess)
                 if res.get("compliant"):
                     self._put_apply([(self.T("vuln_apply_already") + "\n",
                                       "vuln_ok")])
@@ -2099,7 +2065,7 @@ class App(tk.Tk):
                                       "vuln_warn")])
                     skip += 1
                     continue
-                targets = vuln_telnet.apply_targets(res)
+                targets = mod.apply_targets(res)
                 if not targets:
                     self._put_apply([(self.T("vuln_apply_manual") + "\n",
                                       "vuln_warn")])
@@ -2129,11 +2095,11 @@ class App(tk.Tk):
                 self._put_apply(
                     [(self.T("vuln_st_applying").format(host=host) + "\n",
                       None)])
-                sess.configure(vuln_telnet.build_fix_commands(targets))
-                res2 = self._analyze_session(sess)
-                if not res2.get("compliant"):
+                sess.configure(mod.build_fix_commands(targets))
+                res2 = mod.fetch_check_session(sess)
+                if not mod.fix_verified(res2, targets):
                     detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                        sess, changed) else self.T("vuln_rb_bad"))
+                        sess, mod, changed) else self.T("vuln_rb_bad"))
                     self._put_apply(
                         [(self.T("vuln_apply_postfail").format(detail=detail)
                           + "\n", "vuln_fail")])
@@ -2153,7 +2119,7 @@ class App(tk.Tk):
                         debug_log=self._ssh_debug_log())
                 except Exception as e:
                     detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                        sess, changed) else self.T("vuln_rb_bad"))
+                        sess, mod, changed) else self.T("vuln_rb_bad"))
                     self._put_apply(
                         [(self.T("vuln_posttest_fail").format(
                             err=e, detail=detail) + "\n", "vuln_fail")])
@@ -2165,10 +2131,9 @@ class App(tk.Tk):
                 # a NEW session; hold this one open meanwhile.
                 box: dict = {}
                 ev = threading.Event()
+                title, text = mod.verify_prompt(host, self.T)
                 self.msg_queue.put((
-                    "vuln_apply_confirm",
-                    (host, self.T("vuln_verify_msg").format(host=host),
-                     box, ev)))
+                    "vuln_apply_confirm", (title, text, box, ev)))
                 alive = True
                 while not ev.is_set():
                     if self._vuln_stop.is_set():
@@ -2203,7 +2168,7 @@ class App(tk.Tk):
                     ok += 1
                 else:
                     detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                        sess, changed) else self.T("vuln_rb_bad"))
+                        sess, mod, changed) else self.T("vuln_rb_bad"))
                     tag = ("vuln_warn" if detail == self.T("vuln_rb_ok")
                            else "vuln_fail")
                     self._put_apply(
@@ -2212,7 +2177,7 @@ class App(tk.Tk):
                     rb += 1
             except cisco_ssh.ConfigFailed as e:
                 detail = (self.T("vuln_rb_ok") if self._try_rollback(
-                    sess, changed) else self.T("vuln_rb_bad"))
+                    sess, mod, changed) else self.T("vuln_rb_bad"))
                 self._put_apply(
                     [(self.T("vuln_apply_error").format(err=e) + "\n",
                       "vuln_fail"),
@@ -2221,7 +2186,7 @@ class App(tk.Tk):
                 fail += 1
             except Exception as e:
                 if changed:
-                    self._try_rollback(sess, changed)
+                    self._try_rollback(sess, mod, changed)
                 self._put_apply([(self.T("vuln_apply_error").format(err=e)
                                   + "\n", "vuln_fail")])
                 fail += 1
@@ -3334,11 +3299,9 @@ class App(tk.Tk):
                     else:
                         self._insert_vuln_segments(segs, clear=False)
                 elif kind == "vuln_apply_confirm":
-                    host, text, box, ev = payload
+                    title, text, box, ev = payload
                     try:
-                        ok = messagebox.askyesno(
-                            self.T("vuln_verify_title").format(host=host),
-                            text)
+                        ok = messagebox.askyesno(title, text)
                     except tk.TclError:
                         ok = False
                     box["ok"] = bool(ok)

@@ -45,6 +45,14 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   rollback bez pytania) → Twoje potwierdzenie (nowa sesja SSH do
   testu) → dopiero wtedy `write memory`, w razie odmowy rollback
   z weryfikacją.
+- **Podatności c.d.: pakiet SSH** — druga pozycja na liście podatności:
+  słabe MAC / KEX / szyfry CBC, Terrapin (CVE-2023-48795) i SSHv1.
+  Sprawdzane handshake bez logowania (oferta serwera, jak skaner) plus
+  `show ip ssh` / running-config / `show version`. Poprawka minimalna
+  (oferowane minus flagowane) liniami `ip ssh server algorithm ...`
+  tylko tam, gdzie switch je obsługuje (auto-wykrywanie z `show ip ssh`
+  i wersji IOS-XE vs klasyczny IOS) — reszta trafia do opisu w OpenProject.
+  Wdrażanie tym samym bezpiecznym protokołem co Telnet.
 - **Ustawienia** — język, adres serwera DHCP, zmiana hasła głównego,
   opcjonalny log debugowania SSH (`ssh_debug.log`).
 
@@ -91,6 +99,17 @@ nie da się odszyfrować `devices.enc`. Hasło trzymane jest tylko w pamięci.
 python ssh_test.py <host> <użytkownik> [port]    # pełny test logowania + ACL
 python ssh_probe.py <host> [port]                # sam handshake (bez logowania)
 ```
+
+## Testy
+
+```powershell
+python -m unittest discover -s tests -t .   # cała suita (stdlib, bez sieci)
+```
+
+Testy jednostkowe (`tests/`, tylko biblioteka standardowa) pokrywają analizę
+Telnet, sortowanie, import XML (mRemoteNG AES-GCM/CBC + generyczny + merge),
+`enable` na fejk-kanale oraz worker wdrażania poprawki na fejk-urządzeniu.
+Testy okienkowe (`test_vuln_ui.py`) same się pomijają, gdy brak wyświetlacza.
 
 ## Kontrola DHCP
 
