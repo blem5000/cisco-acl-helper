@@ -298,6 +298,8 @@ def run_commands(host: str, username: str, password: str,
 
 _CONFIG_ERROR = re.compile(r"^%|command rejected", re.M | re.IGNORECASE)
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
 
 class ConfigFailed(RuntimeError):
     """Some `configure terminal` sub-commands were rejected by IOS."""
@@ -382,14 +384,38 @@ class ConfigSession:
             raise RuntimeError(f"{self.host}: session is not open")
         return _clean_output(_shell_exec(self._chan, command, wait), command)
 
+    def _prompt_tail(self, command: str = "", wait: float = 1.2) -> str:
+        """Last non-empty line from RAW shell output (no echo stripping).
+
+        Prompt detection must use raw output: _clean_output() removes the
+        trailing prompt line, so a cleaned read can never see '#' or '>'.
+        """
+        if self._chan is None:
+            raise RuntimeError(f"{self.host}: session is not open")
+        raw = _ANSI.sub("", _shell_exec(self._chan, command, wait))
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        return lines[-1] if lines else ""
+
     def ensure_privileged(self) -> None:
-        """Raise unless the shell sits at a '#' (enable) prompt."""
-        out = self.exec("", 1.2)
-        lines = [ln for ln in out.splitlines() if ln.strip()]
-        if not lines or not re.search(r"#\s*$", lines[-1]):
+        """Reach a '#' prompt, trying a bare `enable` when needed.
+
+        Devices without an enable secret land at '>' and accept a plain
+        `enable`; devices with one get the configured secret answered.
+        Raises showing the last prompt seen when elevation fails.
+        """
+        if re.search(r"#\s*$", self._prompt_tail()):
+            return
+        out = _ANSI.sub("", _shell_exec(self._chan, "enable", 1.5))
+        if re.search(r"[Pp]assword", out):
+            self._chan.send((self.enable or "") + "\n")
+            time.sleep(1.0)
+            _shell_read(self._chan, 0.5)
+        last = self._prompt_tail()
+        if not re.search(r"#\s*$", last):
             raise RuntimeError(
-                f"{self.host}: privileged (enable) mode not reached - "
-                f"check the enable secret.")
+                f"{self.host}: privileged (enable) mode not reached "
+                f"(prompt: {last!r}). The account needs privilege 15 or a "
+                f"working `enable` (enable secret, if the device has one).")
 
     def configure(self, commands: list | tuple) -> None:
         """Push config sub-commands via `configure terminal` ... `end`.
