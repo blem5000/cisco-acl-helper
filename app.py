@@ -863,7 +863,12 @@ class App(tk.Tk):
         self.btn_vuln_marked = ttk.Button(vbtns, text="",
                                           command=self.vuln_select_marked)
         self.btn_vuln_marked.pack(side="left", padx=2)
-        self.vuln_prog = ttk.Progressbar(vbtns, mode="determinate", length=120)
+        self.vuln_style = ttk.Style(self)
+        self.vuln_style.configure("VulnWork.Horizontal.TProgressbar",
+                                  background="gold", thickness=18)
+        self.vuln_style.configure("VulnDone.Horizontal.TProgressbar",
+                                  background="green", thickness=18)
+        self.vuln_prog = ttk.Progressbar(vbtns, mode="determinate", length=220)
         self.vuln_prog.pack(side="left", padx=(14, 0))
 
         self.lbl_vuln_results = ttk.Label(self.tab_vuln, text="")
@@ -1516,12 +1521,29 @@ class App(tk.Tk):
                 pass
 
     def refresh_tree(self):
+        try:
+            sel_hosts = set()
+            for r in self.tree.selection():
+                i = self.tree.index(r)
+                if 0 <= i < len(self.devices):
+                    sel_hosts.add(self.devices[i].get("host", ""))
+        except (tk.TclError, AttributeError):
+            sel_hosts = set()
         for i in self.tree.get_children():
             self.tree.delete(i)
         for d in self.devices:
             mark = "\u2611" if d.get("audit", True) else "\u2610"
             self.tree.insert("", "end", values=(mark, d.get("hostname", ""), d.get("host", ""),
                                                 d.get("username", ""), d.get("port", 22)))
+        if sel_hosts:
+            try:
+                for iid in self.tree.get_children():
+                    i = self.tree.index(iid)
+                    if (0 <= i < len(self.devices)
+                            and self.devices[i].get("host", "") in sel_hosts):
+                        self.tree.selection_add(iid)
+            except tk.TclError:
+                pass
         self._update_sort_headers()
         self._refresh_gen_devices()
 
@@ -1785,7 +1807,10 @@ class App(tk.Tk):
         self._vuln_stop.clear()
         self.btn_vuln_check.configure(state="disabled")
         self.btn_vuln_stop.configure(state="normal")
-        self.vuln_prog.configure(maximum=len(devs), value=0)
+        self.vuln_prog.configure(maximum=len(devs), value=0,
+                                   mode="indeterminate",
+                                   style="VulnWork.Horizontal.TProgressbar")
+        self.vuln_prog.start(12)
         self.status.set(self.T("status_searching").format(n=len(devs)))
         snapshot = [dict(d) for d in devs]
         threading.Thread(target=self._vuln_worker, args=(snapshot,),
@@ -1840,7 +1865,6 @@ class App(tk.Tk):
         self._insert_vuln_segments(segs, clear=empty)
         try:
             total = int(self.vuln_prog.cget("maximum") or 0)
-            self.vuln_prog.configure(value=len(self.vuln_results))
             if total:
                 self.status.set(self.T("status_progress").format(
                     done=len(self.vuln_results), total=total))
@@ -1912,7 +1936,18 @@ class App(tk.Tk):
         try:
             self.btn_vuln_check.configure(state="normal")
             self.btn_vuln_stop.configure(state="disabled")
-            self.vuln_prog.configure(value=len(self.vuln_results))
+            self.vuln_prog.stop()
+            total = int(self.vuln_prog.cget("maximum") or 0)
+            if total and len(self.vuln_results) >= total:
+                # everything reported -> solid green bar
+                self.vuln_prog.configure(mode="determinate",
+                                         style="VulnDone.Horizontal.TProgressbar",
+                                         maximum=total, value=total)
+            else:
+                # stopped early -> back to neutral determinate bar
+                self.vuln_prog.configure(mode="determinate",
+                                         style="Horizontal.TProgressbar",
+                                         value=len(self.vuln_results))
         except tk.TclError:
             pass
         ok = sum(1 for _h, r, e in self.vuln_results
@@ -1939,7 +1974,9 @@ class App(tk.Tk):
         self._set_vuln_text("")
         self._set_vuln_prop("")
         try:
-            self.vuln_prog.configure(value=0)
+            self.vuln_prog.stop()
+            self.vuln_prog.configure(mode="determinate",
+                                     style="Horizontal.TProgressbar", value=0)
         except tk.TclError:
             pass
 
@@ -1952,16 +1989,22 @@ class App(tk.Tk):
             self.refresh_tree()
 
     def _on_dev_click(self, event):
-        """Single click on the ✓ column toggles audit marking for that row."""
+        """Single click on the ✓ column toggles audit marking for that row.
+
+        Uses the checkbox cell geometry (bbox), not identify_column(),
+        which mis-reports columns on some Tk builds.
+        """
         try:
             if self.tree.identify("region", event.x, event.y) != "cell":
-                return
-            if self.tree.identify_column(event.x, event.y) != "#1":
                 return
             row = self.tree.identify_row(event.y)
             if not row:
                 return
-            self._toggle_audit_at(self.tree.index(row))
+            bb = self.tree.bbox(row, "audit")
+            if not bb:
+                return
+            if bb[0] <= event.x <= bb[0] + bb[2]:
+                self._toggle_audit_at(self.tree.index(row))
         except tk.TclError:
             pass
 
