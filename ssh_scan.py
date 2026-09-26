@@ -59,33 +59,55 @@ class SSHScanError(RuntimeError):
     pass
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise SSHScanError("connection closed during handshake")
-        buf += chunk
-    return buf
+class _Reader:
+    """Buffered socket reader.
 
+    A banner and the KEXINIT packet often arrive coalesced in one TCP
+    segment. Splitting must happen at the FIRST ``\\n`` -- and any bytes
+    past it belong to the packet framing, so they stay buffered instead
+    of being discarded.
+    """
 
-def _read_banner(sock: socket.socket) -> str:
-    """Server version string; tolerates a few non-SSH preamble lines."""
-    data = b""
-    skipped = 0
-    while True:
-        while not data.endswith(b"\n"):
-            if len(data) > 255:
+    def __init__(self, sock: socket.socket):
+        self.sock = sock
+        self.buf = b""
+
+    def read_line(self) -> bytes:
+        """One line without the trailing newline; rest stays buffered."""
+        while b"\n" not in self.buf:
+            if len(self.buf) > 255:
                 raise SSHScanError("banner line too long (not an SSH server?)")
-            chunk = sock.recv(64)
+            chunk = self.sock.recv(64)
             if not chunk:
                 raise SSHScanError("connection closed before banner")
-            data += chunk
+            self.buf += chunk
+        line, _, rest = self.buf.partition(b"\n")
+        self.buf = rest
+        return line
+
+    def read_exact(self, n: int) -> bytes:
+        while len(self.buf) < n:
+            chunk = self.sock.recv(n - len(self.buf))
+            if not chunk:
+                raise SSHScanError("connection closed during handshake")
+            self.buf += chunk
+            if len(self.buf) > 40000:
+                raise SSHScanError("bad SSH packet length")
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+
+def _read_banner(reader: _Reader) -> str:
+    """Server version string; tolerates a few non-SSH preamble lines."""
+    skipped = 0
+    while True:
         try:
-            line = data.decode("ascii", errors="replace").strip()
+            line = reader.read_line().decode("ascii",
+                                             errors="replace").strip()
+        except SSHScanError:
+            raise
         except Exception as e:
             raise SSHScanError(f"bad banner: {e}") from e
-        data = b""
         if line.startswith("SSH-"):
             return line
         skipped += 1
@@ -112,12 +134,12 @@ def build_kexinit() -> bytes:
             + struct.pack("B", pad_len) + payload + os.urandom(pad_len))
 
 
-def _read_packet(sock: socket.socket, timeout: float) -> tuple[int, bytes]:
-    sock.settimeout(timeout)
-    packet_len = struct.unpack(">I", _recv_exact(sock, 4))[0]
+def _read_packet(reader: _Reader, timeout: float) -> tuple[int, bytes]:
+    reader.sock.settimeout(timeout)
+    packet_len = struct.unpack(">I", reader.read_exact(4))[0]
     if packet_len > 35000 or packet_len < 12:
         raise SSHScanError("bad SSH packet length")
-    body = _recv_exact(sock, packet_len)
+    body = reader.read_exact(packet_len)
     padding_len = body[0]
     payload = body[1:len(body) - padding_len]
     if not payload:
@@ -166,14 +188,15 @@ def scan(host: str, port: int = 22, timeout: float = 10.0) -> dict:
             sock.sendall(CLIENT_VERSION.encode("ascii") + b"\r\n")
         except OSError as e:
             raise SSHScanError(f"cannot send client banner: {e}") from e
-        banner = _read_banner(sock)
+        reader = _Reader(sock)
+        banner = _read_banner(reader)
         try:
             sock.sendall(build_kexinit())
         except OSError:
             pass  # some servers answer before reading ours; keep going
         kex = None
         for _ in range(8):  # skip any pre-KEXINIT noise, then parse
-            msg, payload = _read_packet(sock, timeout)
+            msg, payload = _read_packet(reader, timeout)
             if msg == SSH_MSG_KEXINIT:
                 kex = parse_kexinit(payload)
                 break

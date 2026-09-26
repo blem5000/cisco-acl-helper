@@ -190,5 +190,62 @@ class StrictServerTest(unittest.TestCase):
         self.assertEqual(out["kex"], [])
 
 
+class CoalescedServerTest(unittest.TestCase):
+    """Regression: banner and KEXINIT in a single TCP segment.
+
+    Real switches pipeline both messages; the reader must split at the
+    FIRST newline instead of waiting for a newline at the buffer end
+    (that flake produced 'banner line too long' on random hosts).
+    """
+
+    def _serve_coalesced(self, port_holder, banner, packet):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port_holder.append(srv.getsockname()[1])
+        try:
+            conn, _addr = srv.accept()
+            with conn:
+                conn.settimeout(5.0)
+                version = _read_line(conn)
+                if not version.startswith(b"SSH-"):
+                    return
+                # banner + KEXINIT pipelined in one segment (like real
+                # switches); the client KEXINIT is drained afterwards
+                conn.sendall(banner + b"\r\n" + packet)
+                try:
+                    _read_packet_framed(conn)
+                except OSError:
+                    pass
+                _drain(conn)
+        except OSError:
+            pass
+        finally:
+            try:
+                srv.close()
+            except OSError:
+                pass
+
+    def test_coalesced_banner_and_kexinit(self):
+        kex = ["diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1"]
+        ciphers = ["aes128-ctr", "aes128-cbc"]
+        macs = ["hmac-sha1", "hmac-sha1-96"]
+        ports: list = []
+        t = threading.Thread(
+            target=self._serve_coalesced,
+            args=(ports, b"SSH-1.99-Cisco-1.25",
+                  build_server_kexinit(kex, ciphers, macs)),
+            daemon=True)
+        t.start()
+        while not ports:
+            threading.Event().wait(0.01)
+        res = ssh_scan.scan("127.0.0.1", ports[0], timeout=5.0)
+        t.join(timeout=10)
+        self.assertTrue(res["sshv1"])
+        self.assertEqual(res["kex"], kex)
+        self.assertIn("aes128-cbc", res["ciphers"])
+        self.assertIn("hmac-sha1-96", res["macs"])
+
+
 if __name__ == "__main__":
     unittest.main()
