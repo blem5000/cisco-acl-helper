@@ -105,27 +105,28 @@ class DeviceDialogExtrasTest(unittest.TestCase):
     def test_l3_partner_role_widgets(self):
         dlg = self._open({"host": "10.0.0.1"})
         try:
-            self.assertTrue(dlg.l3_var.get())
+            self.assertFalse(dlg.l3_var.get())
             vals = list(dlg.combo_partner.cget("values"))
-            self.assertIn("10.0.0.2", vals)
-            self.assertNotIn("10.0.0.1", vals)
+            self.assertIn("sw2 10.0.0.2", vals)
+            self.assertNotIn("sw1 10.0.0.1", vals)
+            self.assertNotIn("10.0.0.2", vals)
             self.assertEqual(dlg.role_var.get(), "primary")
         finally:
             dlg.destroy()
 
     def test_initial_values_roundtrip(self):
-        dlg = self._open({"host": "10.0.0.2", "l3": False,
+        dlg = self._open({"host": "10.0.0.2", "l3": True,
                           "partner": "10.0.0.1", "ha_role": "secondary"})
         try:
-            self.assertFalse(dlg.l3_var.get())
-            self.assertEqual(dlg.partner_var.get(), "10.0.0.1")
+            self.assertTrue(dlg.l3_var.get())
+            self.assertEqual(dlg.partner_var.get(), "sw1 10.0.0.1")
             self.assertEqual(dlg.role_var.get(), "secondary")
             dlg.e_host.delete(0, tk.END)
             dlg.e_host.insert(0, "10.0.0.2")
             dlg._on_ok()
             self.assertEqual(dlg.result["partner"], "10.0.0.1")
             self.assertEqual(dlg.result["ha_role"], "secondary")
-            self.assertFalse(dlg.result["l3"])
+            self.assertTrue(dlg.result["l3"])
         finally:
             try:
                 dlg.destroy()

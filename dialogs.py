@@ -121,22 +121,32 @@ class DeviceDialog(tk.Toplevel):
         ttk.Button(self, text=S["show_pass"], width=8,
                    command=lambda: self._toggle(self.e_enable)).grid(row=11, column=1, padx=(0, 12))
 
-        self.l3_var = tk.BooleanVar(value=bool(init.get("l3", True)))
+        self.l3_var = tk.BooleanVar(value=bool(init.get("l3", False)))
         ttk.Checkbutton(self, text=S["dev_l3"],
                         variable=self.l3_var).grid(row=12, column=0, columnspan=2,
                                                   sticky="w", padx=12, pady=(8, 0))
 
         ttk.Label(self, text=S["dev_partner"]).grid(row=13, column=0, sticky="w",
                                                     padx=12, pady=(8, 2))
-        others = sorted({str(d.get("host", "")).strip()
-                         for d in (devices or []) if d.get("host")})
+        def _dev_label(d):
+            hn = (d.get("hostname") or "").strip()
+            host = str(d.get("host", "")).strip()
+            return f"{hn} {host}".strip() if hn else host
+
         own = (init.get("host") or "").strip()
-        others = [h for h in others if h != own]
-        self.partner_var = tk.StringVar(
-            value=(init.get("partner") or "").strip() or self._none_label)
+        self._partner_map = {}
+        for d in (devices or []):
+            h = str(d.get("host", "")).strip()
+            if h and h != own:
+                self._partner_map.setdefault(_dev_label(d), h)
+        init_partner = (init.get("partner") or "").strip()
+        init_label = next((lb for lb, h in self._partner_map.items()
+                           if h == init_partner), self._none_label)
+        self.partner_var = tk.StringVar(value=init_label)
         self.combo_partner = ttk.Combobox(self, textvariable=self.partner_var,
-                                          state="readonly", width=29,
-                                          values=[self._none_label] + others)
+                                          state="readonly", width=34,
+                                          values=[self._none_label]
+                                          + sorted(self._partner_map))
         self.combo_partner.grid(row=14, column=0, columnspan=2, padx=12)
 
         ttk.Label(self, text=S["dev_role"]).grid(row=15, column=0, sticky="w",
@@ -171,6 +181,8 @@ class DeviceDialog(tk.Toplevel):
             messagebox.showwarning("ACL", "Bad port.")
             return
         partner = self.partner_var.get().strip()
+        if partner and partner != self._none_label:
+            partner = self._partner_map.get(partner, partner)
         self.result = {
             "hostname": self.e_hostname.get().strip(),
             "host": host,

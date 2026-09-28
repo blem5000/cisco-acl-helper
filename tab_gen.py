@@ -272,7 +272,7 @@ class GeneratorTabMixin:
             if show_all:
                 out.append(d)
                 continue
-            if not d.get("l3", True):
+            if not d.get("l3", False):
                 continue
             if (d.get("ha_role") or "") == "secondary":
                 continue

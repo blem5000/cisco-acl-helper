@@ -104,7 +104,8 @@ class TrackVisibleTest(unittest.TestCase):
         devs = [{"host": "10.0.0.1", "l3": True, "ha_role": "primary"},
                 {"host": "10.0.0.2", "l3": True, "ha_role": "secondary"},
                 {"host": "10.0.0.3", "l3": False},
-                {"host": "10.0.0.4"}]
+                {"host": "10.0.0.4", "l3": True},
+                {"host": "10.0.0.5"}]
         self.assertEqual(self._hosts(self._stub(devs, False)),
                          ["10.0.0.1", "10.0.0.4"])
 
