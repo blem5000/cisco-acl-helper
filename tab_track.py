@@ -115,9 +115,21 @@ class TrackTabMixin:
         visited: set = set()
         cur = dict(dev)
         hop = 0
+        done_sent = False
+
+        def _finish(cont_payload):
+            # the UI unfreezes only on track_done - guarantee exactly one
+            nonlocal done_sent
+            if not done_sent:
+                done_sent = True
+                self.msg_queue.put(("track_done", cont_payload))
+
+        def _stopped_chunk():
+            self.msg_queue.put(("track_chunk", (None, self.T("track_stopped") + "\n")))
+
         while True:
             if stop.is_set():
-                self.msg_queue.put(("track_chunk", (None, self.T("track_stopped") + "\n")))
+                _stopped_chunk()
                 break
             host = cur.get("host", "?")
             if host in visited:
@@ -137,7 +149,7 @@ class TrackTabMixin:
             partner_visited = (partner is None
                                or partner.get("host", "?") in visited)
 
-            def _hop_to_partner(reason_key: str | None = None):
+            def _hop_to_partner():
                 """Jump to the HA partner (own stored credentials).
 
                 Returns True when the hop was taken.
@@ -145,8 +157,6 @@ class TrackTabMixin:
                 nonlocal cont, partner_hop
                 if partner is None or partner_visited:
                     return False
-                if reason_key:
-                    lines.append(reason_key)
                 lines.append(self.T("track_partner_hop").format(
                     host=partner.get("host", "?")))
                 cont = dict(partner)
@@ -159,11 +169,16 @@ class TrackTabMixin:
             try:
                 arp_out = self._track_run(cur, f"show ip arp {ip}", debug_log)
                 self.msg_queue.put(("track_prog", 1))
+                if stop.is_set():
+                    lines.append(self.T("track_stopped"))
+                    self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                    break
                 arp = track.parse_arp(arp_out, ip)
                 mac, origin = track.resolve_mac(arp, cur.get("mac", ""))
                 if mac is None:
                     if _hop_to_partner():
                         self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                        cur = cont
                         continue
                     if arp and arp.get("incomplete"):
                         lines.append(self.T("track_arp_incomplete").format(ip=ip))
@@ -183,10 +198,15 @@ class TrackTabMixin:
                 mac_out = self._track_run(cur, f"show mac address-table address {mac}",
                                           debug_log)
                 self.msg_queue.put(("track_prog", 2))
+                if stop.is_set():
+                    lines.append(self.T("track_stopped"))
+                    self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                    break
                 entries = track.parse_mac_table(mac_out, mac)
                 if not entries:
                     if _hop_to_partner():
                         self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                        cur = cont
                         continue
                     if partner is not None:
                         lines.append(self.T("track_mac_none_both").format(
@@ -203,6 +223,10 @@ class TrackTabMixin:
 
                 cdp_out = self._track_run(cur, "show cdp neighbors detail", debug_log)
                 self.msg_queue.put(("track_prog", 3))
+                if stop.is_set():
+                    lines.append(self.T("track_stopped"))
+                    self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                    break
                 nb = track.find_cdp_on_port(track.parse_cdp_detail(cdp_out), port)
                 if not nb:
                     lines.append(self.T("track_cdp_none").format(port=port, host=host))
@@ -238,11 +262,10 @@ class TrackTabMixin:
                 self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
                 proceed = auto or partner_hop
                 if cont is None or not proceed:
-                    self.msg_queue.put(("track_done", cont if not auto else None))
+                    _finish(cont if not auto else None)
                     break
                 cur = cont
-        if auto:
-            self.msg_queue.put(("track_done", None))
+        _finish(None)
 
     # ---------- search tab ----------
 

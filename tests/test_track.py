@@ -1,7 +1,9 @@
 """Tests for HA partner tracking helpers (headless-safe)."""
 
 import os
+import queue
 import sys
+import threading
 import types
 import unittest
 
@@ -9,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import track
 from app import App
+from i18n import STRINGS
 
 
 class PortChannelTest(unittest.TestCase):
@@ -116,6 +119,105 @@ class TrackVisibleTest(unittest.TestCase):
                 {"host": ""}]
         self.assertEqual(self._hosts(self._stub(devs, True)),
                          ["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+
+
+def _worker_stub(run_fn, stop_set=None):
+    stub = types.SimpleNamespace(
+        msg_queue=queue.Queue(),
+        T=lambda k: STRINGS["en"].get(k, k),
+        _track_stop=stop_set or threading.Event(),
+    )
+    stub._track_run = types.MethodType(run_fn, stub)
+    return stub
+
+
+def _drain(stub, start=None):
+    """Run the worker synchronously, collect (kind, payload) list."""
+    out = []
+    devices = [{"host": "10.0.0.1", "partner": "10.0.0.2"},
+               {"host": "10.0.0.2", "partner": "10.0.0.1",
+                "ha_role": "secondary"}]
+    App._track_worker(stub, "10.9.9.9",
+                      dict(start) if start else dict(devices[0]),
+                      devices, False, None)
+    while not stub.msg_queue.empty():
+        out.append(stub.msg_queue.get_nowait())
+    return out
+
+
+def _kinds(msgs):
+    return [k for k, _p in msgs]
+
+
+class WorkerDoneTest(unittest.TestCase):
+    """Every terminal path must emit exactly one track_done (UI unfreeze)."""
+
+    def test_arp_miss_emits_done(self):
+        def run(_self, _dev, cmd, _dbg):
+            return ""
+        msgs = _drain(_worker_stub(run))
+        self.assertIn("track_done", _kinds(msgs))
+        self.assertEqual(_kinds(msgs).count("track_done"), 1)
+        chunks = [p[1] for k, p in msgs if k == "track_chunk"]
+        self.assertTrue(any("10.0.0.2" in c for c in chunks))  # partner tried
+        self.assertTrue(any("nor on HA partner" in c for c in chunks))
+
+    def test_exception_emits_done(self):
+        def run(_self, _dev, cmd, _dbg):
+            raise RuntimeError("ssh gone")
+        msgs = _drain(_worker_stub(run))
+        self.assertEqual(_kinds(msgs).count("track_done"), 1)
+        self.assertTrue(any("ERROR" in p[1]
+                            for k, p in msgs if k == "track_chunk"))
+
+    def test_stop_emits_done(self):
+        stop = threading.Event()
+        stop.set()
+        msgs = _drain(_worker_stub(lambda *_a: "", stop))
+        self.assertEqual(_kinds(msgs).count("track_done"), 1)
+
+    def test_cdp_continue_keeps_payload(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab = ("  10    aaaa.bbbb.cccc    DYNAMIC     Gi1/0/5")
+        cdp = ("--------------------------\nDevice ID: sw2\n"
+               "IP address: 10.0.0.2\n"
+               "Interface: GigabitEthernet1/0/5,  Port ID (outgoing port): Gi1/0/1\n"
+               "Platform: cisco WS-C2960X\n"
+               "--------------------------\n")
+        script = {"arp": mac_line, "mac": mactab, "cdp": cdp}
+
+        def run(_self, _dev, cmd, _dbg):
+            if "ip arp" in cmd:
+                return script["arp"]
+            if "mac address-table" in cmd:
+                return script["mac"]
+            return script["cdp"]
+        msgs = _drain(_worker_stub(run))
+        dones = [p for k, p in msgs if k == "track_done"]
+        self.assertEqual(len(dones), 1)
+        self.assertEqual(dones[0]["host"], "10.0.0.2")  # Continue button target
+
+    def test_partner_hop_over_portchannel(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab = "  10    aaaa.bbbb.cccc    DYNAMIC     Po1"
+        script = {"10.0.0.1": {"arp": mac_line, "mac": mactab, "cdp": ""},
+                  "10.0.0.2": {"arp": "", "mac": "", "cdp": ""}}
+
+        def run(_self, dev, cmd, _dbg):
+            host = dev.get("host", "")
+            if "ip arp" in cmd:
+                return script[host]["arp"]
+            if "mac address-table" in cmd:
+                return script[host]["mac"]
+            return script[host]["cdp"]
+        msgs = _drain(_worker_stub(run))
+        chunks = [p[1] for k, p in msgs if k == "track_chunk"]
+        self.assertTrue(any("HA partner 10.0.0.2" in c for c in chunks))
+        self.assertTrue(any("nor on HA partner 10.0.0.1" in c
+                            for c in chunks))
+        self.assertEqual(_kinds(msgs).count("track_done"), 1)
 
 
 if __name__ == "__main__":
