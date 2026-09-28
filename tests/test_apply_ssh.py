@@ -159,7 +159,7 @@ class ApplySSHTest(unittest.TestCase):
             while True:
                 kind, payload = stub.msg_queue.get(timeout=60)
                 if kind == "vuln_apply_confirm":
-                    _title, _text, box, ev = payload
+                    _title, _text, box, ev, creds = payload
                     confirms.append(True)
                     box["ok"] = True
                     ev.set()

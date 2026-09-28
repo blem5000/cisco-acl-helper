@@ -138,11 +138,13 @@ class ApplyWorkerTest(unittest.TestCase):
                 args=([([dict(DEV)], vuln_telnet)],), daemon=True)
             worker.start()
             chunks, confirms, refreshes, done = [], [], [], None
+            creds_seen = []
             while True:
                 kind, payload = stub.msg_queue.get(timeout=30)
                 if kind == "vuln_apply_confirm":
-                    _title, _text, box, ev = payload
+                    _title, _text, box, ev, creds = payload
                     confirms.append(_title)
+                    creds_seen.append(creds)
                     box["ok"] = answer
                     ev.set()
                 elif kind == "vuln_apply_chunk":
@@ -155,15 +157,17 @@ class ApplyWorkerTest(unittest.TestCase):
             worker.join(timeout=30)
             self.assertFalse(worker.is_alive())
         text = "\n".join(t for segs in chunks for t, _tag in segs)
-        return done, text, confirms, refreshes
+        return done, text, confirms, refreshes, creds_seen
 
     def test_confirm_yes_writes_memory(self):
         ApplyWorkerTest.posttest_fail = False
-        done, text, confirms, refreshes = self._run_worker(True)
+        done, text, confirms, refreshes, creds_seen = self._run_worker(True)
         sess = FakeSess.created[-1]
         self.assertEqual(done, {"ok": 1, "rb": 0, "fail": 0, "skip": 0})
         self.assertEqual(len(confirms), 1)
         self.assertIn("10.0.0.1", confirms[0])
+        self.assertEqual(creds_seen, [{"host": "10.0.0.1", "port": 22,
+                                       "username": "a", "password": "p"}])
         self.assertIn("write memory", sess.log)
         self.assertEqual(sess.state, {"0 4": "ssh", "5 15": "ssh"})
         self.assertIn("pre-flight OK", text)
@@ -178,7 +182,7 @@ class ApplyWorkerTest(unittest.TestCase):
 
     def test_confirm_no_rolls_back(self):
         ApplyWorkerTest.posttest_fail = False
-        done, text, confirms, refreshes = self._run_worker(False)
+        done, text, confirms, refreshes, _creds = self._run_worker(False)
         sess = FakeSess.created[-1]
         self.assertEqual(done, {"ok": 0, "rb": 1, "fail": 0, "skip": 0})
         self.assertEqual(len(confirms), 1)
@@ -192,7 +196,7 @@ class ApplyWorkerTest(unittest.TestCase):
 
     def test_failed_posttest_auto_rolls_back_without_dialog(self):
         ApplyWorkerTest.posttest_fail = True
-        done, text, confirms, refreshes = self._run_worker(True)
+        done, text, confirms, refreshes, _creds = self._run_worker(True)
         sess = FakeSess.created[-1]
         self.assertEqual(done, {"ok": 0, "rb": 0, "fail": 1, "skip": 0})
         self.assertEqual(confirms, [])

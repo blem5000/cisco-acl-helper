@@ -44,8 +44,9 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   (świeże logowanie SSH) → konfiguracja → weryfikacja w running-config
   i automatyczny test nowej sesji SSH (przy odmowie natychmiastowy
   rollback bez pytania) → Twoje potwierdzenie (nowa sesja SSH do
-  testu) → dopiero wtedy `write memory`, w razie odmowy rollback
-  z weryfikacją.
+  testu, przycisk **Otwórz w PuTTY** loguje danymi urządzenia —
+  ścieżkę do `putty.exe` podajesz w Ustawieniach) → dopiero wtedy
+  `write memory`, w razie odmowy rollback z weryfikacją.
 - **Podatności c.d.: pakiet SSH** — druga pozycja na liście podatności:
   słabe MAC / KEX / szyfry CBC, Terrapin (CVE-2023-48795) i SSHv1.
   Sprawdzane handshake bez logowania (oferta serwera, jak skaner) plus
@@ -119,6 +120,15 @@ Testy jednostkowe (`tests/`, tylko biblioteka standardowa) pokrywają analizę
 Telnet, sortowanie, import XML (mRemoteNG AES-GCM/CBC + generyczny + merge),
 `enable` na fejk-kanale oraz worker wdrażania poprawki na fejk-urządzeniu.
 Testy okienkowe (`test_vuln_ui.py`) same się pomijają, gdy brak wyświetlacza.
+Na każdy push GitHub Actions odpala suitę na Windows (`.github/workflows/tests.yml`).
+
+## Struktura kodu
+
+`app.py` trzyma szkielet aplikacji (okno, ustawienia, aktualizacje, magazyn
+haseł, kolejka komunikatów). Logika zakładek żyje w mixinach
+(`tab_search.py`, `tab_devices.py`, `tab_subnets.py`, `tab_gen.py`,
+`tab_track.py`, `tab_audit.py`, `tab_vuln.py`), dialogi w `dialogs.py`.
+Kontrakty podatności opisuje pamięć projektu (agent-memory #107).
 
 ## Kontrola DHCP
 
