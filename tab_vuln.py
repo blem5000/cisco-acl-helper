@@ -188,10 +188,22 @@ class VulnTabMixin:
 
     def stop_vuln_check(self):
         self._vuln_stop.set()
+        # instant feedback: the worker may still wait out SSH timeouts
+        self.status.set(self.T("vuln_stopping"))
+        try:
+            self.btn_vuln_stop.configure(state="disabled")
+        except tk.TclError:
+            pass
 
     def _vuln_worker(self, devs: list[dict], mods: list):
         """Check selected switches (up to 5 SSH sessions); one result chunk
-        per (device, provider), device-major order."""
+        per (device, provider), device-major submission order.
+
+        Results are collected as they finish (FIRST_COMPLETED), so progress
+        and Stop stay responsive even with one straggler holding the line.
+        On stop, pending tasks are cancelled and running sessions are
+        abandoned, not waited out - the UI resets immediately.
+        """
         def one_check(args):
             d, mod = args
             host = d.get("host", "?")
@@ -204,21 +216,39 @@ class VulnTabMixin:
             except Exception as e:
                 return (host, None, str(e))
 
-        # keep original order: submit in order, collect in order
+        def _silence(fut):
+            try:
+                fut.exception()
+            except Exception:
+                pass
+
         tasks = [(d, mod) for d in devs for mod in mods]
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(5, len(tasks) or 1)) as ex:
-            futs = [ex.submit(one_check, t) for t in tasks]
-            for fut in futs:
+        ex = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(5, len(tasks) or 1))
+        try:
+            futs = {ex.submit(one_check, t) for t in tasks}
+            while futs:
                 if self._vuln_stop.is_set():
-                    for f in futs:
-                        f.cancel()
                     break
-                try:
-                    payload = fut.result()
-                except Exception as e:
-                    payload = ("?", None, str(e))
-                self.msg_queue.put(("vuln_chunk", payload))
+                finished, _pending = concurrent.futures.wait(
+                    futs, timeout=0.5,
+                    return_when=concurrent.futures.FIRST_COMPLETED)
+                for fut in finished:
+                    futs.discard(fut)
+                    try:
+                        payload = fut.result()
+                    except Exception as e:
+                        payload = ("?", None, str(e))
+                    self.msg_queue.put(("vuln_chunk", payload))
+            for fut in futs:
+                fut.cancel()
+                fut.add_done_callback(_silence)
+            ex.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
         self.msg_queue.put(("vuln_done", None))
 
     def _finish_vuln_chunk(self, host: str, res: dict | None, err: str | None):
