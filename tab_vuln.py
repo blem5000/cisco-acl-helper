@@ -11,6 +11,7 @@ from tkinter import messagebox, ttk
 import cisco_ssh
 import vuln_ssh
 import vuln_telnet
+import vuln_tls
 from i18n import STRINGS
 
 
@@ -29,7 +30,9 @@ class VulnTabMixin:
                 (vuln_telnet.VULN_ID, S["vuln_telnet_name"],
                  S["vuln_telnet_desc"]),
                 (vuln_ssh.VULN_ID, S["vuln_ssh_name"],
-                 S["vuln_ssh_desc"])]
+                 S["vuln_ssh_desc"]),
+                (vuln_tls.VULN_ID, S["vuln_tls_name"],
+                 S["vuln_tls_desc"])]
 
     @staticmethod
     def _vuln_mod(vuln_id: str):
@@ -39,7 +42,7 @@ class VulnTabMixin:
     def _vuln_mods(vuln_id: str) -> list:
         """Provider modules for a registry id (all of them for "all")."""
         if vuln_id == VULN_ALL_ID:
-            return [VULN_MODS[vid] for vid in ("telnet", "ssh")
+            return [VULN_MODS[vid] for vid in ("telnet", "ssh", "tls")
                     if vid in VULN_MODS]
         return [VULN_MODS.get(vuln_id, vuln_telnet)]
 
@@ -832,7 +835,7 @@ class VulnTabMixin:
         self.lbl_vuln_prop.configure(text=S["vuln_proposal_label"])
         self._refresh_vuln_combo()
 
-VULN_MODS = {"telnet": vuln_telnet, "ssh": vuln_ssh}
+VULN_MODS = {"telnet": vuln_telnet, "ssh": vuln_ssh, "tls": vuln_tls}
 VULN_ALL_ID = "all"
 def _first_reject_line(err) -> str:
     """First IOS rejection line of a ConfigFailed error (for the report)."""

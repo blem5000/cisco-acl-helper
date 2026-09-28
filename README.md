@@ -69,6 +69,7 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   | SSH Server CBC Mode Ciphers Enabled | szyfry `*-cbc` |
   | SSH Terrapin Prefix Truncation Weakness (CVE-2023-48795) | ChaCha20 albo CBC+z-EtM bez strict-kex |
   | SSH Protocol Version 1 Session Key Retrieval | banner `SSH-1.x` / `version 1.99` |
+- **Podatności c.d.: niezabezpieczony HTTP(S)** — trzecia pozycja: `TLS Version 1.0 Protocol Detection`. Polityka: serwer HTTP(S) ma być wyłączony na switchach (`no ip http server`, `no ip http secure-server`), więc check to obecność tych linii w running-config, a poprawka działa na każdym IOS. Kontrolery WLC są wykrywane z `show version` i pomijane z powodem do OpenProject.
 - **Ustawienia** — język, adres serwera DHCP, zmiana hasła głównego,
   opcjonalny log debugowania SSH (`ssh_debug.log`).
 
