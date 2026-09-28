@@ -26,31 +26,43 @@ def build_server_kexinit(kex, ciphers, macs) -> bytes:
             + struct.pack("B", pad_len) + payload + b"P" * pad_len)
 
 
-def _read_line(conn) -> bytes:
-    data = b""
-    while not data.endswith(b"\n"):
-        chunk = conn.recv(64)
-        if not chunk:
-            raise OSError("closed")
-        data += chunk
-    return data
+class _FakeReader:
+    """Buffered reader for the fake servers.
 
+    The client version line and its KEXINIT packet routinely arrive
+    coalesced; reading must split at the FIRST newline and keep the tail
+    for the framed packet (same trap as ssh_scan._Reader, mirrored here
+    so the fakes can never deadlock on segmentation).
+    """
 
-def _read_packet_framed(conn) -> bytes:
-    raw_len = b""
-    while len(raw_len) < 4:
-        chunk = conn.recv(4 - len(raw_len))
-        if not chunk:
-            raise OSError("closed")
-        raw_len += chunk
-    (plen,) = struct.unpack(">I", raw_len)
-    body = b""
-    while len(body) < plen:
-        chunk = conn.recv(plen - len(body))
-        if not chunk:
-            raise OSError("closed")
-        body += chunk
-    return body
+    def __init__(self, conn):
+        self.conn = conn
+        self.buf = b""
+
+    def read_line(self) -> bytes:
+        while b"\n" not in self.buf:
+            chunk = self.conn.recv(64)
+            if not chunk:
+                raise OSError("closed")
+            self.buf += chunk
+        line, _, rest = self.buf.partition(b"\n")
+        self.buf = rest
+        return line + b"\n"
+
+    def read_framed(self) -> bytes:
+        while len(self.buf) < 4:
+            chunk = self.conn.recv(4 - len(self.buf))
+            if not chunk:
+                raise OSError("closed")
+            self.buf += chunk
+        (plen,) = struct.unpack(">I", self.buf[:4])
+        while len(self.buf) < 4 + plen:
+            chunk = self.conn.recv(4 + plen - len(self.buf))
+            if not chunk:
+                raise OSError("closed")
+            self.buf += chunk
+        body, self.buf = self.buf[4:4 + plen], self.buf[4 + plen:]
+        return body
 
 
 def _drain(conn):
@@ -77,8 +89,9 @@ class FakeSSHServer(threading.Thread):
             conn, _addr = self.sock.accept()
             with conn:
                 conn.sendall(self.banner + b"\r\n")
-                _read_line(conn)  # client version
-                _read_packet_framed(conn)  # client KEXINIT (drained)
+                fr = _FakeReader(conn)
+                fr.read_line()  # client version
+                fr.read_framed()  # client KEXINIT (drained)
                 conn.sendall(self.packet)
                 _drain(conn)
         except OSError:
@@ -135,11 +148,12 @@ class StrictServerTest(unittest.TestCase):
             with conn:
                 conn.settimeout(5.0)
                 # banner FIRST (like real servers), then validate the client
-                version = _read_line(conn)
+                fr = _FakeReader(conn)
+                version = fr.read_line()
                 if not version.startswith(b"SSH-"):
                     return  # garbage version -> drop
                 conn.sendall(banner + b"\r\n")
-                body = _read_packet_framed(conn)
+                body = fr.read_framed()
                 pad = body[0]
                 payload = body[1:len(body) - pad]
                 if not payload or payload[0] != ssh_scan.SSH_MSG_KEXINIT:
@@ -207,14 +221,15 @@ class CoalescedServerTest(unittest.TestCase):
             conn, _addr = srv.accept()
             with conn:
                 conn.settimeout(5.0)
-                version = _read_line(conn)
+                fr = _FakeReader(conn)
+                version = fr.read_line()
                 if not version.startswith(b"SSH-"):
                     return
                 # banner + KEXINIT pipelined in one segment (like real
                 # switches); the client KEXINIT is drained afterwards
                 conn.sendall(banner + b"\r\n" + packet)
                 try:
-                    _read_packet_framed(conn)
+                    fr.read_framed()
                 except OSError:
                     pass
                 _drain(conn)
