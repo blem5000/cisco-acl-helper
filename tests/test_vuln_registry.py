@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import App, VULN_ALL_ID
 from i18n import STRINGS
+import vuln_ntp
 import vuln_ssh
 import vuln_telnet
 import vuln_tls
@@ -40,12 +41,13 @@ class RegistryTest(unittest.TestCase):
 class ModsMappingTest(unittest.TestCase):
     def test_all_maps_to_all_providers_in_order(self):
         self.assertEqual(App._vuln_mods(VULN_ALL_ID),
-                         [vuln_telnet, vuln_ssh, vuln_tls])
+                         [vuln_telnet, vuln_ssh, vuln_tls, vuln_ntp])
 
     def test_single_ids_map_to_one(self):
         self.assertEqual(App._vuln_mods(vuln_telnet.VULN_ID), [vuln_telnet])
         self.assertEqual(App._vuln_mods(vuln_ssh.VULN_ID), [vuln_ssh])
         self.assertEqual(App._vuln_mods(vuln_tls.VULN_ID), [vuln_tls])
+        self.assertEqual(App._vuln_mods(vuln_ntp.VULN_ID), [vuln_ntp])
 
     def test_unknown_id_falls_back_to_telnet(self):
         self.assertEqual(App._vuln_mods("nope"), [vuln_telnet])
