@@ -45,6 +45,25 @@ class DevicesTabMixin:
         except tk.TclError:
             pass
 
+    def _on_dev_double_click(self, event):
+        """Double-click opens the edit dialog - except on the audit
+        checkbox cell (a double-click there is two toggles, which cancel
+        out) and on headers (toggle-all lives there). Same bbox geometry
+        check as the single-click toggle, for the same Tk reasons."""
+        try:
+            region = self.tree.identify("region", event.x, event.y)
+            if region == "heading":
+                return
+            if region == "cell":
+                row = self.tree.identify_row(event.y)
+                if row:
+                    bb = self.tree.bbox(row, "audit")
+                    if bb and bb[0] <= event.x <= bb[0] + bb[2]:
+                        return
+        except tk.TclError:
+            pass
+        self.edit_device()
+
     def _on_dev_space(self, _event):
         """Space toggles audit marking for all currently selected rows."""
         sel = self.tree.selection()
@@ -353,7 +372,7 @@ class DevicesTabMixin:
         cols = ("audit", "hostname", "host", "user", "port")
         self.tree = ttk.Treeview(self.tab_dev, columns=cols, show="headings", height=14)
         self.tree.pack(fill="both", expand=True, padx=10)
-        self.tree.bind("<Double-1>", lambda _e: self.edit_device())
+        self.tree.bind("<Double-1>", self._on_dev_double_click)
         self.tree.bind("<ButtonRelease-1>", self._on_dev_click)
         self.tree.bind("<space>", self._on_dev_space)
         self.tree.column("audit", width=44, minwidth=44, stretch=False, anchor="center")

@@ -80,6 +80,59 @@ class AuditClickTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+@unittest.skipUnless(HAS_DISPLAY, "no display")
+class AuditDoubleClickTest(unittest.TestCase):
+    """Double-click on the checkbox must not open the edit dialog
+    (two rapid toggles cancel out; the dialog would only confuse)."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.geometry("600x300+5000+5000")
+        self.root.deiconify()
+        self.tree = ttk.Treeview(
+            self.root, columns=("audit", "hostname", "host"),
+            show="headings", height=5)
+        self.tree.pack(fill="both", expand=True)
+        self.tree.column("audit", width=44, minwidth=44, stretch=False,
+                         anchor="center")
+        self.tree.heading("audit", text="\u2713")
+        for c in ("hostname", "host"):
+            self.tree.heading(c, text=c)
+        self.root.update_idletasks()
+        self.root.update()
+        self.edits = []
+        self.fake = types.SimpleNamespace(tree=self.tree)
+        self.fake.edit_device = lambda: self.edits.append(True)
+        self.ev = types.SimpleNamespace(x=0, y=0)
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def _double(self, x, y):
+        self.ev.x, self.ev.y = x, y
+        App._on_dev_double_click(self.fake, self.ev)
+
+    def test_audit_cell_no_edit(self):
+        self.tree.insert("", "end", values=("\u2610", "sw", "10.0.0.9"))
+        self.root.update_idletasks()
+        row = self.tree.get_children()[0]
+        bb = self.tree.bbox(row, "audit")
+        self._double(bb[0] + 3, bb[1] + 3)
+        self.assertEqual(self.edits, [])
+
+    def test_other_cell_edits(self):
+        self.tree.insert("", "end", values=("\u2610", "sw", "10.0.0.9"))
+        self.root.update_idletasks()
+        row = self.tree.get_children()[0]
+        bb = self.tree.bbox(row, "hostname")
+        self._double(bb[0] + 3, bb[1] + 3)
+        self.assertEqual(self.edits, [True])
+
+    def test_heading_no_edit(self):
+        self._double(10, 5)
+        self.assertEqual(self.edits, [])
+
+
 if HAS_DISPLAY:
     from dialogs import DeviceDialog
 
