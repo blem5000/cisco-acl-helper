@@ -255,16 +255,46 @@ class GeneratorTabMixin:
         self.after(0, lambda: (self._set_dhcp_indicator(ip, status, detail)
                                if self.ent_gen_pc.get().strip() == ip else None))
 
+    def _track_visible_devices(self) -> list[dict]:
+        """Start devices for IP tracking: L3 switches, primaries by default.
+
+        Secondaries of HA pairs are hidden unless 'all devices' is ticked
+        (a trace always starts from the primary of a pair).
+        """
+        try:
+            show_all = bool(self.track_all_var.get())
+        except (tk.TclError, AttributeError):
+            show_all = True
+        out = []
+        for d in self.devices:
+            if not d.get("host"):
+                continue
+            if show_all:
+                out.append(d)
+                continue
+            if not d.get("l3", True):
+                continue
+            if (d.get("ha_role") or "") == "secondary":
+                continue
+            out.append(d)
+        return out
+
     def _refresh_gen_devices(self):
         labels = [self.dev_label(d) for d in self.devices if d.get("host")]
         self.combo_gen_dev.configure(values=labels)
         if self.gen_dev_var.get() not in labels:
             cur = self._lookup_device(self.gen_dev_var.get().strip())
             self.gen_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
-        self.combo_track_dev.configure(values=labels)
-        if self.track_dev_var.get() not in labels:
+        track_devs = self._track_visible_devices()
+        track_labels = [self.dev_label(d) for d in track_devs]
+        self.combo_track_dev.configure(values=track_labels)
+        if self.track_dev_var.get() not in track_labels:
             cur = self._lookup_device(self.track_dev_var.get().strip())
-            self.track_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
+            if cur is not None and any(cur.get("host") == d.get("host")
+                                       for d in track_devs):
+                self.track_dev_var.set(self.dev_label(cur))
+            else:
+                self.track_dev_var.set(track_labels[0] if track_labels else "")
         self.combo_audit_dev.configure(values=labels)
         if self.audit_dev_var.get() not in labels:
             cur = self._lookup_device(self.audit_dev_var.get().strip())

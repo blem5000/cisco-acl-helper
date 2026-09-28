@@ -80,6 +80,59 @@ class AuditClickTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+if HAS_DISPLAY:
+    from dialogs import DeviceDialog
+
+
+@unittest.skipUnless(HAS_DISPLAY, "no display")
+class DeviceDialogExtrasTest(unittest.TestCase):
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.geometry("600x400+5000+5000")
+        self.root.deiconify()
+        self.devices = [{"host": "10.0.0.1", "hostname": "sw1"},
+                        {"host": "10.0.0.2", "hostname": "sw2"}]
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def _open(self, initial=None):
+        dlg = DeviceDialog(self.root, "en", "t", initial,
+                           self.devices)
+        self.root.update_idletasks()
+        return dlg
+
+    def test_l3_partner_role_widgets(self):
+        dlg = self._open({"host": "10.0.0.1"})
+        try:
+            self.assertTrue(dlg.l3_var.get())
+            vals = list(dlg.combo_partner.cget("values"))
+            self.assertIn("10.0.0.2", vals)
+            self.assertNotIn("10.0.0.1", vals)
+            self.assertEqual(dlg.role_var.get(), "primary")
+        finally:
+            dlg.destroy()
+
+    def test_initial_values_roundtrip(self):
+        dlg = self._open({"host": "10.0.0.2", "l3": False,
+                          "partner": "10.0.0.1", "ha_role": "secondary"})
+        try:
+            self.assertFalse(dlg.l3_var.get())
+            self.assertEqual(dlg.partner_var.get(), "10.0.0.1")
+            self.assertEqual(dlg.role_var.get(), "secondary")
+            dlg.e_host.delete(0, tk.END)
+            dlg.e_host.insert(0, "10.0.0.2")
+            dlg._on_ok()
+            self.assertEqual(dlg.result["partner"], "10.0.0.1")
+            self.assertEqual(dlg.result["ha_role"], "secondary")
+            self.assertFalse(dlg.result["l3"])
+        finally:
+            try:
+                dlg.destroy()
+            except tk.TclError:
+                pass
+
+
 @unittest.skipUnless(HAS_DISPLAY, "no display")
 class ProgressStyleTest(unittest.TestCase):
     def test_custom_styles_apply(self):

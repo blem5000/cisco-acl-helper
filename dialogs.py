@@ -72,7 +72,8 @@ class MasterDialog(tk.Toplevel):
         self.destroy()
 
 class DeviceDialog(tk.Toplevel):
-    def __init__(self, parent, lang: str, title: str, initial: dict | None = None):
+    def __init__(self, parent, lang: str, title: str, initial: dict | None = None,
+                 devices: list | None = None):
         super().__init__(parent)
         S = STRINGS[lang]
         self.title(title)
@@ -82,6 +83,7 @@ class DeviceDialog(tk.Toplevel):
                          "password": "", "enable": ""}
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self._none_label = S["partner_none"]
 
         ttk.Label(self, text=S["fld_hostname"]).grid(row=0, column=0, sticky="w",
                                                      padx=12, pady=(12, 2))
@@ -119,8 +121,36 @@ class DeviceDialog(tk.Toplevel):
         ttk.Button(self, text=S["show_pass"], width=8,
                    command=lambda: self._toggle(self.e_enable)).grid(row=11, column=1, padx=(0, 12))
 
+        self.l3_var = tk.BooleanVar(value=bool(init.get("l3", True)))
+        ttk.Checkbutton(self, text=S["dev_l3"],
+                        variable=self.l3_var).grid(row=12, column=0, columnspan=2,
+                                                  sticky="w", padx=12, pady=(8, 0))
+
+        ttk.Label(self, text=S["dev_partner"]).grid(row=13, column=0, sticky="w",
+                                                    padx=12, pady=(8, 2))
+        others = sorted({str(d.get("host", "")).strip()
+                         for d in (devices or []) if d.get("host")})
+        own = (init.get("host") or "").strip()
+        others = [h for h in others if h != own]
+        self.partner_var = tk.StringVar(
+            value=(init.get("partner") or "").strip() or self._none_label)
+        self.combo_partner = ttk.Combobox(self, textvariable=self.partner_var,
+                                          state="readonly", width=29,
+                                          values=[self._none_label] + others)
+        self.combo_partner.grid(row=14, column=0, columnspan=2, padx=12)
+
+        ttk.Label(self, text=S["dev_role"]).grid(row=15, column=0, sticky="w",
+                                                 padx=12, pady=(8, 2))
+        self.role_var = tk.StringVar(value=(init.get("ha_role") or "primary"))
+        role_fr = ttk.Frame(self)
+        role_fr.grid(row=16, column=0, columnspan=2, sticky="w", padx=12)
+        ttk.Radiobutton(role_fr, text=S["role_primary"], value="primary",
+                        variable=self.role_var).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(role_fr, text=S["role_secondary"], value="secondary",
+                        variable=self.role_var).pack(side="left")
+
         fr = ttk.Frame(self)
-        fr.grid(row=12, column=0, columnspan=2, pady=14)
+        fr.grid(row=17, column=0, columnspan=2, pady=14)
         ttk.Button(fr, text=S["ok_btn"], command=self._on_ok).pack(side="left", padx=6)
         ttk.Button(fr, text=S["cancel_btn"], command=self.destroy).pack(side="left", padx=6)
         self.transient(parent)
@@ -140,6 +170,7 @@ class DeviceDialog(tk.Toplevel):
         except ValueError:
             messagebox.showwarning("ACL", "Bad port.")
             return
+        partner = self.partner_var.get().strip()
         self.result = {
             "hostname": self.e_hostname.get().strip(),
             "host": host,
@@ -147,7 +178,14 @@ class DeviceDialog(tk.Toplevel):
             "username": self.e_user.get().strip(),
             "password": self.e_pass.get(),
             "enable": self.e_enable.get(),
+            "l3": bool(self.l3_var.get()),
+            "partner": "",
+            "ha_role": "",
         }
+        if partner and partner != self._none_label:
+            self.result["partner"] = partner
+            self.result["ha_role"] = (self.role_var.get().strip()
+                                      or "primary")
         self.destroy()
 
 class ImportDialog(tk.Toplevel):

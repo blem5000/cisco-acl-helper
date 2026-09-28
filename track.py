@@ -52,6 +52,26 @@ def normalize_port(name: str) -> str:
     return s
 
 
+def is_portchannel(port: str) -> bool:
+    """Po1, Port-channel1 ... -> True (uplink candidate to HA partner)."""
+    return normalize_port(port or "").startswith("port-channel")
+
+
+def find_partner(devices: list[dict], dev: dict) -> dict | None:
+    """HA partner of `dev` by the stored host link; None when unpaired,
+    unknown, or linked to itself."""
+    want = (dev.get("partner") or "").strip().lower()
+    if not want:
+        return None
+    me = (dev.get("host") or "").strip().lower()
+    if want == me:
+        return None
+    for d in devices or []:
+        if str(d.get("host", "")).strip().lower() == want:
+            return d
+    return None
+
+
 def parse_arp(output: str, ip: str) -> dict | None:
     """Parse `show ip arp <ip>`.
 

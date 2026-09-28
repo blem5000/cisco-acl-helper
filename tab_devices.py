@@ -85,13 +85,39 @@ class DevicesTabMixin:
             return None
         return self.tree.index(sel[0])
 
+    def _link_partner(self, idx: int, old: dict):
+        """Mirror the HA pair link to the partner device.
+
+        Setting partner P + role R on this device writes partner=self +
+        opposite role on P. Stale one-sided backlinks (old partner, renamed
+        hosts, removed links) are cleared.
+        """
+        me = self.devices[idx]
+        new_host = me.get("host", "")
+        new_p = (me.get("partner") or "").strip()
+        old_host = (old or {}).get("host", "")
+        my_role = (me.get("ha_role") or "primary").strip() or "primary"
+        opp = "secondary" if my_role == "primary" else "primary"
+        for i, d in enumerate(self.devices):
+            if i == idx:
+                continue
+            dh = d.get("host", "")
+            if new_p and dh == new_p:
+                d["partner"] = new_host
+                d["ha_role"] = opp
+            elif d.get("partner") in (new_host, old_host) and dh != new_p:
+                d["partner"] = ""
+                d["ha_role"] = ""
+
     def add_device(self):
         if not self._require_unlocked():
             return
-        dlg = DeviceDialog(self, self.lang, self.T("dlg_add_title"))
+        dlg = DeviceDialog(self, self.lang, self.T("dlg_add_title"),
+                           None, self.devices)
         self.wait_window(dlg)
         if dlg.result:
             self.devices.append(dlg.result)
+            self._link_partner(len(self.devices) - 1, {})
             self.persist_store()
             self.refresh_tree()
 
@@ -101,11 +127,14 @@ class DevicesTabMixin:
         idx = self._selected_device_idx()
         if idx is None:
             return
-        dlg = DeviceDialog(self, self.lang, self.T("dlg_edit_title"), self.devices[idx])
+        old = dict(self.devices[idx])
+        dlg = DeviceDialog(self, self.lang, self.T("dlg_edit_title"), self.devices[idx],
+                           self.devices)
         self.wait_window(dlg)
         if dlg.result:
             dlg.result["audit"] = self.devices[idx].get("audit", True)
             self.devices[idx] = dlg.result
+            self._link_partner(idx, old)
             self.persist_store()
             self.refresh_tree()
 
@@ -118,6 +147,10 @@ class DevicesTabMixin:
         host = self.devices[idx].get("host", "")
         if messagebox.askyesno("ACL", self.T("confirm_del").format(host=host)):
             del self.devices[idx]
+            for d in self.devices:
+                if d.get("partner") == host:
+                    d["partner"] = ""
+                    d["ha_role"] = ""
             self.persist_store()
             self.refresh_tree()
 
@@ -131,10 +164,14 @@ class DevicesTabMixin:
         src = dict(self.devices[idx])
         src["host"] = ""
         src["hostname"] = ""
-        dlg = DeviceDialog(self, self.lang, self.T("dlg_dup_title"), src)
+        src["partner"] = ""
+        src["ha_role"] = ""
+        dlg = DeviceDialog(self, self.lang, self.T("dlg_dup_title"), src,
+                           self.devices)
         self.wait_window(dlg)
         if dlg.result:
             self.devices.append(dlg.result)
+            self._link_partner(len(self.devices) - 1, {})
             self.persist_store()
             self.refresh_tree()
 

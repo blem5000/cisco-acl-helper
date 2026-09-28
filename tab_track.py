@@ -132,14 +132,45 @@ class TrackTabMixin:
             hop += 1
             lines = [f"=== {host} : {ip} ==="]
             cont: dict | None = None
+            partner_hop = False
+            partner = track.find_partner(devices, cur)
+            partner_visited = (partner is None
+                               or partner.get("host", "?") in visited)
+
+            def _hop_to_partner(reason_key: str | None = None):
+                """Jump to the HA partner (own stored credentials).
+
+                Returns True when the hop was taken.
+                """
+                nonlocal cont, partner_hop
+                if partner is None or partner_visited:
+                    return False
+                if reason_key:
+                    lines.append(reason_key)
+                lines.append(self.T("track_partner_hop").format(
+                    host=partner.get("host", "?")))
+                cont = dict(partner)
+                carry = mac or cur.get("mac", "")
+                if carry:
+                    cont["mac"] = carry
+                partner_hop = True
+                return True
+
             try:
                 arp_out = self._track_run(cur, f"show ip arp {ip}", debug_log)
                 self.msg_queue.put(("track_prog", 1))
                 arp = track.parse_arp(arp_out, ip)
                 mac, origin = track.resolve_mac(arp, cur.get("mac", ""))
                 if mac is None:
+                    if _hop_to_partner():
+                        self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                        continue
                     if arp and arp.get("incomplete"):
                         lines.append(self.T("track_arp_incomplete").format(ip=ip))
+                    elif partner is not None:
+                        lines.append(self.T("track_arp_none_both").format(
+                            ip=ip, host=host,
+                            partner=partner.get("host", "?")))
                     else:
                         lines.append(self.T("track_arp_none").format(ip=ip, host=host))
                     self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
@@ -154,7 +185,15 @@ class TrackTabMixin:
                 self.msg_queue.put(("track_prog", 2))
                 entries = track.parse_mac_table(mac_out, mac)
                 if not entries:
-                    lines.append(self.T("track_mac_none").format(mac=mac, host=host))
+                    if _hop_to_partner():
+                        self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
+                        continue
+                    if partner is not None:
+                        lines.append(self.T("track_mac_none_both").format(
+                            mac=mac, host=host,
+                            partner=partner.get("host", "?")))
+                    else:
+                        lines.append(self.T("track_mac_none").format(mac=mac, host=host))
                     self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
                     break
                 port = entries[0]["port"]
@@ -167,6 +206,10 @@ class TrackTabMixin:
                 nb = track.find_cdp_on_port(track.parse_cdp_detail(cdp_out), port)
                 if not nb:
                     lines.append(self.T("track_cdp_none").format(port=port, host=host))
+                    if track.is_portchannel(port):
+                        # Port-channel with no CDP info usually leads to the
+                        # HA partner - follow it with the partner's own creds.
+                        _hop_to_partner()
                 else:
                     plat = f" [{nb['platform']}]" if nb.get("platform") else ""
                     lines.append(f"CDP: {port} -> {nb['device']} ({nb.get('ip', '?')})"
@@ -193,7 +236,8 @@ class TrackTabMixin:
                 break
             else:
                 self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
-                if cont is None or not auto:
+                proceed = auto or partner_hop
+                if cont is None or not proceed:
                     self.msg_queue.put(("track_done", cont if not auto else None))
                     break
                 cur = cont
@@ -218,6 +262,11 @@ class TrackTabMixin:
         self.combo_track_dev = ttk.Combobox(tf, textvariable=self.track_dev_var,
                                             state="readonly", width=24, values=[])
         self.combo_track_dev.grid(row=1, column=1, sticky="w", padx=(16, 0), pady=4)
+        self.track_all_var = tk.BooleanVar(value=False)
+        self.chk_track_all = ttk.Checkbutton(tf, text="",
+                                             variable=self.track_all_var,
+                                             command=self._refresh_gen_devices)
+        self.chk_track_all.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=4)
 
         tbtns = ttk.Frame(self.tab_track)
         tbtns.pack(fill="x", padx=10, pady=(0, 8))
@@ -258,5 +307,6 @@ class TrackTabMixin:
         self.btn_track.configure(text=S["track_btn"])
         self.btn_track_stop.configure(text=S["stop_btn"])
         self.btn_track_clear.configure(text=S["clear_btn"])
+        self.chk_track_all.configure(text=S["track_all"])
         self.chk_track_parent.configure(text=S["track_parent_creds"])
         self.lbl_track_results.configure(text=S["results_label"])

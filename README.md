@@ -34,7 +34,13 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   `show mac address-table` → port → sąsiad `show cdp neighbors detail`.
   Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada
   po IP lub nazwie hosta, opcjonalnie logowanie poświadczeniami urządzenia
-  nadrzędnego).
+  nadrzędnego). Lista startowa pokazuje switche L3 (flaga w urządzeniu),
+  domyślnie tylko primary z par HA (opcja Wszystkie pokazuje resztę).
+  Gdy MAC wypada na porcie port-channel bez sąsiada CDP, ślad przechodzi
+  automatycznie na sparowanego partnera HA (własne poświadczenia);
+  brak wpisu na obu partnerach kończy się stosownym komunikatem.
+  Pary HA (primary/secondary) definiuje się w edycji urządzenia —
+  druga strona linkowana jest automatycznie.
 - **Podatności** — sprawdzanie podatności (nieszyfrowany Telnet:
   każda `line vty` musi mieć `transport input ssh`) na urządzeniach
   zaznaczonych ✓ w zakładce Urządzenia, równolegle do 5 hostów, wyniki
