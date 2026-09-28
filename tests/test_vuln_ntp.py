@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -102,16 +103,74 @@ class NoteTest(unittest.TestCase):
 
 
 class ProbePacketTest(unittest.TestCase):
-    def test_request_is_mode6_readvar(self):
+    def test_default_request_is_full_header_vn4_readvar(self):
         req = ntp_probe.build_mode6_request()
+        self.assertEqual(len(req), 12)       # truncated packets get dropped
         self.assertEqual(req[0] & 0x07, 6)   # mode
-        self.assertEqual((req[0] >> 3) & 0x07, 3)  # version
-        self.assertEqual(req[1], 1)          # READVAR opcode
+        self.assertEqual((req[0] >> 3) & 0x07, 4)  # version
+        self.assertEqual(req[1], 2)          # READVAR opcode
+        self.assertEqual(req[2:], b"\x00" * 10)
+
+    def test_variants_cover_vn2_vn3_vn4(self):
+        vns = {(label, vn) for label, vn, _op in ntp_probe.REQUEST_VARIANTS
+               for _ in [0]}
+        self.assertTrue({2, 3, 4} <= {vn for _label, vn in vns})
+        for label, vn, op in ntp_probe.REQUEST_VARIANTS:
+            req = ntp_probe.build_mode6_request(vn, op)
+            self.assertEqual(len(req), 12, label)
+            self.assertEqual(req[0] & 0x07, 6, label)
+            self.assertEqual((req[0] >> 3) & 0x07, vn, label)
+            self.assertEqual(req[1], op, label)
 
     def test_response_recognition(self):
         self.assertTrue(ntp_probe.is_mode6_response(b"\x1e\x02\x00\x00"))
         self.assertFalse(ntp_probe.is_mode6_response(b"\x1c\x02\x00\x00"))
         self.assertFalse(ntp_probe.is_mode6_response(b"\x1e\x02"))
+
+
+class ProbeVariantsTest(unittest.TestCase):
+    """probe() tries every variant; a stack answering only an older
+    version (like the one Nessus caught while our 4-byte VN3 packet
+    stayed silent) must still be reported vulnerable."""
+
+    def _run_probe(self, answer_vn):
+        import socket as sockmod
+        sent = []
+
+        class FakeSock:
+            def __init__(self, *a, **k):
+                pass
+
+            def settimeout(self, t):
+                pass
+
+            def sendto(self, data, addr):
+                sent.append(data)
+
+            def recvfrom(self, n):
+                vn = (sent[-1][0] >> 3) & 0x07
+                if vn == answer_vn:
+                    return b"\x16\x02\x00\x00" + b"v" * 20, ("1.2.3.4", 123)
+                raise sockmod.timeout()
+
+            def close(self):
+                pass
+
+        with mock.patch.object(sockmod, "socket", FakeSock):
+            return ntp_probe.probe("1.2.3.4", tries=1), sent
+
+    def test_stack_answering_only_vn2_is_vulnerable(self):
+        (responded, detail), sent = self._run_probe(2)
+        self.assertTrue(responded)
+        self.assertIn("vn2/readvar", detail)
+        # newest version tried first
+        self.assertEqual((sent[0][0] >> 3) & 0x07, 4)
+
+    def test_silent_stack_stays_compliant(self):
+        (responded, detail), sent = self._run_probe(99)
+        self.assertFalse(responded)
+        self.assertEqual(detail, "no mode 6 reply (timeout)")
+        self.assertEqual(len(sent), len(ntp_probe.REQUEST_VARIANTS))
 
 
 if __name__ == "__main__":
