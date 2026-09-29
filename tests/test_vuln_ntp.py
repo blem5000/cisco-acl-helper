@@ -44,6 +44,26 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(
             v._parse_query_only("ntp access-group query-only  FOO \n"), "FOO")
 
+    def test_all_groups_parsing(self):
+        out = ("ntp access-group peer PEER-ACL\n"
+               "ntp access-group serve-only SO-ACL\n"
+               "ntp access-group serve SERVE-ACL\n"
+               "ntp access-group query-only Q-ACL\n"
+               "ntp server 10.0.0.1\n")
+        groups = v._parse_groups(out)
+        self.assertEqual(groups, {"peer": "PEER-ACL", "serve-only": "SO-ACL",
+                                  "serve": "SERVE-ACL", "query-only": "Q-ACL"})
+        self.assertEqual(v._parse_groups(NO_NTP),
+                         {"peer": None, "serve-only": None,
+                          "serve": None, "query-only": None})
+
+    def test_groups_exposed_in_result(self):
+        out = "ntp access-group serve SERVE-ACL\n"
+        r = v.analyze_ntp(True, "x", out)
+        self.assertEqual(r["groups"]["serve"], "SERVE-ACL")
+        self.assertIsNone(r["groups"]["query-only"])
+        self.assertIsNone(r["query_acl"])
+
 
 class FixRollbackTest(unittest.TestCase):
     def test_fix_commands(self):
@@ -100,6 +120,152 @@ class NoteTest(unittest.TestCase):
         for r in (v.analyze_ntp(True, "x", NO_NTP),
                   v.analyze_ntp(False, "timeout", NO_NTP)):
             self.assertEqual(v.openproject_note("10.0.0.9", r, self.T), "")
+
+    def test_note_names_peer_serve_groups(self):
+        out = ("ntp access-group serve SERVE-ACL\n"
+               "ntp access-group query-only NTP-QUERY-BLOCK\n")
+        r = v.analyze_ntp(True, "284-byte mode 6 reply (vn4/readvar)", out)
+        note = v.openproject_note("10.207.96.61", r, self.T)
+        self.assertIn("10.207.96.61", note)
+        self.assertIn("serve SERVE-ACL", note)
+
+    def test_note_when_interface_unscoppable(self):
+        out = "ntp access-group query-only NTP-QUERY-BLOCK\n"
+        r = v.analyze_ntp(True, "284-byte mode 6 reply (vn4/readvar)", out)
+        note = v.openproject_note("10.207.96.61", r, self.T)
+        self.assertIn("10.207.96.61", note)
+        self.assertIn("NTP-QUERY-BLOCK", note)
+
+    def test_no_note_when_fallback_appliable(self):
+        out = ("ntp access-group query-only NTP-QUERY-BLOCK\n"
+               "ntp server 172.26.56.2 prefer\n"
+               "ntp server 172.26.56.3\n")
+        brief = ("Interface              IP-Address  OK? Method Status "
+                 "Protocol\n"
+                 "Vlan1                  10.207.96.61 YES manual up up\n")
+        r = v.analyze_ntp(True, "x", out, brief, "10.207.96.61")
+        self.assertTrue(r["fallback_ok"])
+        self.assertEqual(v.openproject_note("10.207.96.61", r, self.T), "")
+
+    def test_other_groups_shown_in_result(self):
+        out = ("ntp access-group peer PEER-ACL\n"
+               "ntp access-group query-only NTP-QUERY-BLOCK\n")
+        r = v.analyze_ntp(True, "x", out)
+        text = "\n".join(t for t, _tag in v.format_result("h", r, self.T))
+        self.assertIn("peer PEER-ACL", text)
+        self.assertIn("NTP-QUERY-BLOCK", text)
+
+
+class FallbackTest(unittest.TestCase):
+    INCLUDE = ("ntp access-group query-only NTP-QUERY-BLOCK\n"
+               "ntp server 172.26.115.1\n"
+               "ntp server 172.26.60.1\n"
+               "ntp server 172.26.56.2 prefer\n"
+               "ntp server 172.26.56.3\n")
+    BRIEF = ("Interface              IP-Address      OK? Method Status "
+             "Protocol\n"
+             "Vlan1                  10.207.96.61    YES manual up up\n"
+             "Gi1/0/1                unassigned      YES unset  up up\n")
+    SERVERS = ["172.26.115.1", "172.26.60.1", "172.26.56.2", "172.26.56.3"]
+
+    def test_secondary_mode_selected(self):
+        r = v.analyze_ntp(True, "x", self.INCLUDE, self.BRIEF,
+                           "10.207.96.61")
+        self.assertTrue(r["secondary"])
+        self.assertTrue(r["fallback_ok"])
+        self.assertEqual(r["mgmt_if"], "Vlan1")
+        self.assertEqual(r["servers"], self.SERVERS)
+        self.assertTrue(v.needs_apply(r))
+        self.assertIn("NTP-CTRL-IN", r["proposal"])
+        self.assertIn("interface Vlan1", r["proposal"])
+
+    def test_primary_mode_without_our_block(self):
+        r = v.analyze_ntp(True, "x", "ntp server 10.0.0.1\n")
+        self.assertFalse(r["secondary"])
+        self.assertFalse(r["fallback_ok"])
+        self.assertIn("NTP-QUERY-BLOCK", r["proposal"])
+
+    def test_servers_parsing(self):
+        servers, ok = v._parse_servers(self.INCLUDE)
+        self.assertEqual(servers, self.SERVERS)
+        self.assertTrue(ok)
+        self.assertEqual(v._parse_servers("ntp server 10.0.0.1\n"),
+                         (["10.0.0.1"], True))
+        _s, ok = v._parse_servers("ntp server 10.0.0.1\n"
+                                  "ntp server time.example.com\n")
+        self.assertFalse(ok)  # hostname would leave a hole
+        _s, ok = v._parse_servers("ntp server vrf MGMT 10.0.0.1\n")
+        self.assertFalse(ok)
+        _s, ok = v._parse_servers("")
+        self.assertFalse(ok)
+
+    def test_interface_matching(self):
+        self.assertEqual(v._find_mgmt_interface(self.BRIEF, "10.207.96.61"),
+                         "Vlan1")
+        self.assertIsNone(v._find_mgmt_interface(self.BRIEF, "10.9.9.9"))
+        self.assertIsNone(v._find_mgmt_interface(self.BRIEF, "switch1"))
+        self.assertIsNone(v._find_mgmt_interface("", "10.207.96.61"))
+
+    def test_no_fallback_without_interface(self):
+        r = v.analyze_ntp(True, "x", self.INCLUDE, self.BRIEF, "10.9.9.9")
+        self.assertTrue(r["secondary"])
+        self.assertFalse(r["fallback_ok"])
+        self.assertEqual(v.apply_targets(r), [])
+        self.assertFalse(v.needs_apply(r))
+        self.assertEqual(r["proposal"], "")
+
+    def test_no_fallback_without_servers(self):
+        include = "ntp access-group query-only NTP-QUERY-BLOCK\n"
+        r = v.analyze_ntp(True, "x", include, self.BRIEF, "10.207.96.61")
+        self.assertFalse(r["fallback_ok"])
+        self.assertEqual(v.apply_targets(r), [])
+
+    def test_fallback_fix_commands(self):
+        r = v.analyze_ntp(True, "x", self.INCLUDE, self.BRIEF,
+                           "10.207.96.61")
+        targets = v.apply_targets(r)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["sub"], "ntp-if")
+        cmds = v.build_fix_commands(targets, r)
+        self.assertEqual(cmds, [
+            "ip access-list extended NTP-CTRL-IN",
+            "permit udp host 172.26.115.1 eq ntp any",
+            "permit udp host 172.26.60.1 eq ntp any",
+            "permit udp host 172.26.56.2 eq ntp any",
+            "permit udp host 172.26.56.3 eq ntp any",
+            "deny udp any any eq ntp log",
+            "permit ip any any",
+            "exit",
+            "interface Vlan1",
+            "ip access-group NTP-CTRL-IN in",
+            "exit",
+        ])
+        groups = v.split_fix_groups(targets, r)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0][0], "ntp-if")
+
+    def test_fallback_rollback(self):
+        r = v.analyze_ntp(True, "x", self.INCLUDE, self.BRIEF,
+                           "10.207.96.61")
+        # worker calls rollback WITHOUT result - snapshot must suffice
+        cmds = v.build_rollback_commands(v.apply_targets(r))
+        self.assertEqual(cmds, [
+            "interface Vlan1",
+            "no ip access-group NTP-CTRL-IN in",
+            "exit",
+            "no ip access-list extended NTP-CTRL-IN",
+        ])
+
+    def test_fallback_info_shown(self):
+        def T(key):
+            return STRINGS["en"].get(key, key)
+
+        r = v.analyze_ntp(True, "x", self.INCLUDE, self.BRIEF,
+                           "10.207.96.61")
+        text = "\n".join(t for t, _tag in v.format_result("h", r, T))
+        self.assertIn("NTP-CTRL-IN", text)
+        self.assertIn("Vlan1", text)
+        self.assertIn("172.26.56.2", text)
 
 
 class ProbePacketTest(unittest.TestCase):

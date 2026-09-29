@@ -25,18 +25,41 @@ from i18n import STRINGS
 
 
 class FakeSwitch:
-    """State = whether mode 6 queries are blocked."""
+    """State = whether mode 6 queries are blocked.
 
-    def __init__(self):
+    query_only: the primary block is configured. ignores_query_only:
+    platform defect simulation - the block is present but queries still
+    get answers (like 2960S on 15.2(1)E1).
+    """
+
+    INCLUDE = "show running-config | include ^ntp"
+    BRIEF = "show ip interface brief"
+
+    def __init__(self, query_only=False, ignores_query_only=False,
+                 brief_has_host=True):
         self.blocked = False
+        self.query_only = query_only
+        self.ignores_query_only = ignores_query_only
+        self.brief_has_host = brief_has_host
         self.log = []
 
     def show(self, cmd):
-        if cmd == "show running-config | include ^ntp":
-            if self.blocked:
-                return ("ntp access-group query-only NTP-QUERY-BLOCK\n"
-                        "ntp server 10.0.0.1\n")
-            return "ntp server 10.0.0.1\n"
+        if cmd == self.INCLUDE:
+            lines = []
+            if self.query_only:
+                lines.append("ntp access-group query-only NTP-QUERY-BLOCK")
+            lines.append("ntp server 172.26.56.2 prefer")
+            lines.append("ntp server 172.26.56.3")
+            return "\n".join(lines) + "\n"
+        if cmd == self.BRIEF:
+            lines = ["Interface              IP-Address      OK? Method "
+                     "Status Protocol"]
+            if self.brief_has_host:
+                lines.append("Vlan1                  10.9.9.9          "
+                             "YES manual up up")
+            lines.append("Gi1/0/1                unassigned      "
+                         "YES unset  up up")
+            return "\n".join(lines)
         if cmd == "configure terminal":
             return "Enter configuration commands.  End with CNTL/Z."
         if cmd == "end":
@@ -45,17 +68,30 @@ class FakeSwitch:
 
     def config_line(self, cmd):
         self.log.append(cmd)
+        s = cmd.strip()
         if cmd == "ntp access-group query-only NTP-QUERY-BLOCK":
+            self.query_only = True
+            if not self.ignores_query_only:
+                self.blocked = True
+            return ""
+        if cmd == "ip access-group NTP-CTRL-IN in":
             self.blocked = True
             return ""
-        if cmd in ("no ip access-list standard NTP-QUERY-BLOCK",
+        if cmd in ("no ip access-group NTP-CTRL-IN in",
+                   "no ip access-list standard NTP-QUERY-BLOCK",
                    "no ntp access-group query-only NTP-QUERY-BLOCK"):
             self.blocked = False
             return ""
-        if cmd.startswith("ip access-list standard NTP-QUERY-BLOCK"):
+        if cmd == "no ip access-list extended NTP-CTRL-IN":
+            self.blocked = False
             return ""
-        if cmd.startswith(" remark") or cmd.startswith(" deny") \
-                or cmd == " exit":
+        if s.startswith("interface ") or s == "exit":
+            return ""
+        if s.startswith("ip access-list standard NTP-QUERY-BLOCK") \
+                or s.startswith("ip access-list extended NTP-CTRL-IN"):
+            return ""
+        if s.startswith("permit ") or s.startswith("deny ") \
+                or s.startswith("remark"):
             return ""
         raise AssertionError(f"unexpected config cmd: {cmd!r}")
 
@@ -109,8 +145,8 @@ class ApplyNTPTest(unittest.TestCase):
                           port=22, timeout=15, commands=(), debug_log=None):
         return {"show clock": "12:00:00"}
 
-    def _run_worker(self, answer):
-        FakeSess.switches = {"10.9.9.9": FakeSwitch()}
+    def _run_worker(self, answer, switch=None):
+        FakeSess.switches = {"10.9.9.9": switch or FakeSwitch()}
         stub = types.SimpleNamespace(
             msg_queue=queue.Queue(),
             _vuln_stop=threading.Event(),
@@ -172,6 +208,42 @@ class ApplyNTPTest(unittest.TestCase):
         self.assertNotIn("write memory", " ".join(sw.log))
         _host, fresh = refreshes[0]
         self.assertFalse(fresh["compliant"])
+
+    def test_fallback_applied_when_primary_ignored(self):
+        sw0 = FakeSwitch(query_only=True, ignores_query_only=True)
+        done, text, confirms, refreshes = self._run_worker(True, sw0)
+        sw = FakeSess.switches["10.9.9.9"]
+        self.assertEqual(done, {"ok": 1, "rb": 0, "fail": 0, "skip": 0})
+        self.assertEqual(len(confirms), 1)
+        self.assertTrue(sw.blocked)
+        log = " ".join(sw.log)
+        self.assertIn("ip access-list extended NTP-CTRL-IN", log)
+        self.assertIn("permit udp host 172.26.56.2 eq ntp any", log)
+        self.assertIn("deny udp any any eq ntp log", log)
+        self.assertIn("ip access-group NTP-CTRL-IN in", log)
+        self.assertIn("write memory", log)
+        _host, fresh = refreshes[0]
+        self.assertTrue(fresh["compliant"])
+        self.assertIn("mode 6 queries blocked", text)
+
+    def test_fallback_rolls_back(self):
+        sw0 = FakeSwitch(query_only=True, ignores_query_only=True)
+        done, _text, _confirms, refreshes = self._run_worker(False, sw0)
+        sw = FakeSess.switches["10.9.9.9"]
+        self.assertEqual(done, {"ok": 0, "rb": 1, "fail": 0, "skip": 0})
+        self.assertFalse(sw.blocked)
+        self.assertTrue(sw.query_only)  # primary block left untouched
+        self.assertNotIn("write memory", " ".join(sw.log))
+        _host, fresh = refreshes[0]
+        self.assertFalse(fresh["compliant"])
+
+    def test_unscoppable_fallback_skips(self):
+        sw0 = FakeSwitch(query_only=True, ignores_query_only=True,
+                         brief_has_host=False)
+        done, _text, confirms, _refreshes = self._run_worker(True, sw0)
+        self.assertEqual(done, {"ok": 0, "rb": 0, "fail": 0, "skip": 1})
+        self.assertEqual(confirms, [])
+        self.assertNotIn("NTP-CTRL-IN", " ".join(sw0.log))
 
 
 if __name__ == "__main__":
