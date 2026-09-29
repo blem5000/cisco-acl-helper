@@ -66,6 +66,13 @@ TITLE = "Network Time Protocol (NTP) Mode 6 Scanner"
 
 ACL_NAME = "NTP-QUERY-BLOCK"
 
+#: Primary fix also permits the configured servers explicitly (peer
+#: group). Reason: on some trains (e.g. 2960S 15.2(1)E1) a lone
+#: query-only group starves time sync as well - the switch stops
+#: hearing its servers. The peer group keeps sync working while
+#: query-only blocks control queries from everyone else.
+PEER_ACL_NAME = "NTP-SERVERS"
+
 #: Fallback: inbound guard on the management interface.
 IF_ACL_NAME = "NTP-CTRL-IN"
 
@@ -154,6 +161,14 @@ def analyze_ntp(probe_responded: bool, probe_detail: str = "",
     # same lines. Anything else vulnerable gets the primary fix.
     secondary = vulnerable and query_acl == ACL_NAME
     fallback_ok = bool(secondary and mgmt_if and servers_ok)
+    peer_ok = bool(vulnerable and not secondary and servers_ok)
+    if peer_ok:
+        lines = ([f"ip access-list standard {PEER_ACL_NAME}"]
+                 + [f" permit host {s}" for s in servers]
+                 + [" deny   any",
+                    f"ntp access-group peer {PEER_ACL_NAME}"])
+    else:
+        lines = []
     if secondary and fallback_ok:
         lines = ([f"ip access-list extended {IF_ACL_NAME}"]
                  + [f"permit udp host {s} eq ntp any" for s in servers]
@@ -164,7 +179,7 @@ def analyze_ntp(probe_responded: bool, probe_detail: str = "",
                     f"ip access-group {IF_ACL_NAME} in",
                     "exit"])
     elif vulnerable and not secondary:
-        lines = [
+        lines += [
             f"ip access-list standard {ACL_NAME}",
             " remark Block unauthenticated NTP mode 6 control queries",
             " deny   any log",
@@ -210,7 +225,10 @@ def apply_targets(result: dict) -> list[dict]:
             return []
         return [{"sub": "ntp-if", "iface": result.get("mgmt_if"),
                  "servers": list(result.get("servers") or [])}]
-    return [{"sub": "ntp", "orig_query_acl": result.get("query_acl")}]
+    return [{"sub": "ntp", "orig_query_acl": result.get("query_acl"),
+             "orig_peer": (result.get("groups") or {}).get("peer"),
+             "servers": list(result.get("servers") or []),
+             "peer_added": bool(result.get("servers_ok"))}]
 
 
 def needs_apply(result: dict | None) -> bool:
@@ -240,7 +258,17 @@ def build_fix_commands(targets: list[dict], result: dict | None = None
                    f"interface {iface}",
                    f"ip access-group {IF_ACL_NAME} in",
                    "exit"])
-    return [
+    cmds: list[str] = []
+    if t.get("peer_added"):
+        servers = list(t.get("servers") or [])
+        if not servers and result:
+            servers = list(result.get("servers") or [])
+        if servers:
+            cmds += ([f"ip access-list standard {PEER_ACL_NAME}"]
+                     + [f" permit host {s}" for s in servers]
+                     + [" deny   any", " exit",
+                        f"ntp access-group peer {PEER_ACL_NAME}"])
+    return cmds + [
         f"ip access-list standard {ACL_NAME}",
         " remark Block unauthenticated NTP mode 6 control queries",
         " deny   any log",
@@ -271,13 +299,26 @@ def build_rollback_commands(targets: list[dict], result: dict | None = None
         cmds.append(f"no ip access-list extended {IF_ACL_NAME}")
         return cmds
     orig = None
+    orig_peer = None
+    peer_added = False
     for t in targets:
         if t.get("orig_query_acl"):
             orig = t["orig_query_acl"]
-            break
+        if t.get("orig_peer"):
+            orig_peer = t["orig_peer"]
+        if t.get("peer_added"):
+            peer_added = True
     if orig is None and result:
         orig = result.get("query_acl")
-    cmds = [f"no ip access-list standard {ACL_NAME}"]
+    if orig_peer is None and result:
+        orig_peer = (result.get("groups") or {}).get("peer")
+    cmds = []
+    if peer_added:
+        cmds += [f"no ntp access-group peer {PEER_ACL_NAME}",
+                 f"no ip access-list standard {PEER_ACL_NAME}"]
+    if orig_peer and orig_peer != PEER_ACL_NAME:
+        cmds.append(f"ntp access-group peer {orig_peer}")
+    cmds += [f"no ip access-list standard {ACL_NAME}"]
     if orig:
         cmds.append(f"ntp access-group query-only {orig}")
     else:
@@ -391,9 +432,12 @@ def format_result(host: str, result: dict, T) -> list[tuple[str, str | None]]:
 
 def _query_granting_others(result: dict) -> list[str]:
     """Configured peer/serve groups ("<kind> <ACL>") - they grant control
-    queries too, so a permissive one keeps answering despite query-only."""
+    queries too, so a permissive one keeps answering despite query-only.
+    Our own NTP-SERVERS peer group is excluded (it only permits the
+    configured time sources)."""
     groups = (result or {}).get("groups") or {}
-    return [f"{k} {groups[k]}" for k in QUERY_GRANTING if groups.get(k)]
+    return [f"{k} {groups[k]}" for k in QUERY_GRANTING
+            if groups.get(k) and groups[k] != PEER_ACL_NAME]
 
 
 def verify_prompt(host: str, T) -> tuple[str, str]:

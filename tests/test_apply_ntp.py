@@ -85,10 +85,15 @@ class FakeSwitch:
         if cmd == "no ip access-list extended NTP-CTRL-IN":
             self.blocked = False
             return ""
+        if cmd in ("ntp access-group peer NTP-SERVERS",
+                   "no ntp access-group peer NTP-SERVERS",
+                   "no ip access-list standard NTP-SERVERS"):
+            return ""
         if s.startswith("interface ") or s == "exit":
             return ""
         if s.startswith("ip access-list standard NTP-QUERY-BLOCK") \
-                or s.startswith("ip access-list extended NTP-CTRL-IN"):
+                or s.startswith("ip access-list extended NTP-CTRL-IN") \
+                or s.startswith("ip access-list standard NTP-SERVERS"):
             return ""
         if s.startswith("permit ") or s.startswith("deny ") \
                 or s.startswith("remark"):
@@ -155,10 +160,12 @@ class ApplyNTPTest(unittest.TestCase):
             _ssh_debug_log=lambda: None,
         )
         stub._try_rollback = types.MethodType(App._try_rollback, stub)
+        stub._log_cmds = types.MethodType(App._log_cmds, stub)
         stub._put_apply = types.MethodType(App._put_apply, stub)
         stub._apply_worker = types.MethodType(App._apply_worker, stub)
         stub._refresh_and_residual = types.MethodType(
             App._refresh_and_residual, stub)
+        self._last_stub = stub
         with mock.patch.object(cisco_ssh, "ConfigSession", FakeSess), \
                 mock.patch.object(cisco_ssh, "run_commands",
                                   ApplyNTPTest.fake_run_commands), \
@@ -199,6 +206,14 @@ class ApplyNTPTest(unittest.TestCase):
         _host, fresh = refreshes[0]
         self.assertTrue(fresh["compliant"])
         self.assertIn("mode 6 queries blocked", text)
+        hist = self._last_stub.cmd_history
+        kinds = [e["kind"] for e in hist]
+        self.assertIn("fix", kinds)
+        self.assertIn("save", kinds)
+        self.assertNotIn("rollback", kinds)
+        self.assertTrue(all(e["host"] == "10.9.9.9" for e in hist))
+        self.assertIn("ntp access-group query-only NTP-QUERY-BLOCK",
+                      " ".join(c for e in hist for c in e["cmds"]))
 
     def test_no_answer_rolls_back(self):
         done, text, confirms, refreshes = self._run_worker(False)
@@ -208,6 +223,10 @@ class ApplyNTPTest(unittest.TestCase):
         self.assertNotIn("write memory", " ".join(sw.log))
         _host, fresh = refreshes[0]
         self.assertFalse(fresh["compliant"])
+        kinds = [e["kind"] for e in self._last_stub.cmd_history]
+        self.assertIn("fix", kinds)
+        self.assertIn("rollback", kinds)
+        self.assertNotIn("save", kinds)
 
     def test_fallback_applied_when_primary_ignored(self):
         sw0 = FakeSwitch(query_only=True, ignores_query_only=True)

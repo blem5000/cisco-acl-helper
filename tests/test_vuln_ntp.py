@@ -89,7 +89,9 @@ class FixRollbackTest(unittest.TestCase):
         # the original must come from the target snapshot.
         r = v.analyze_ntp(True, "x", WITH_GROUP)
         cmds = v.build_rollback_commands(v.apply_targets(r))
-        self.assertEqual(cmds, ["no ip access-list standard NTP-QUERY-BLOCK",
+        self.assertEqual(cmds, ["no ntp access-group peer NTP-SERVERS",
+                                "no ip access-list standard NTP-SERVERS",
+                                "no ip access-list standard NTP-QUERY-BLOCK",
                                 "ntp access-group query-only OLD-GROUP"])
 
     def test_fix_and_rollback_verified(self):
@@ -266,6 +268,72 @@ class FallbackTest(unittest.TestCase):
         self.assertIn("NTP-CTRL-IN", text)
         self.assertIn("Vlan1", text)
         self.assertIn("172.26.56.2", text)
+
+
+class PrimaryPeerTest(unittest.TestCase):
+    INCLUDE = ("ntp server 172.26.56.2 prefer\n"
+               "ntp server 172.26.56.3\n")
+
+    def test_proposal_permits_servers(self):
+        r = v.analyze_ntp(True, "x", self.INCLUDE)
+        self.assertFalse(r["secondary"])
+        self.assertIn("ntp access-group peer NTP-SERVERS", r["proposal"])
+        self.assertIn("permit host 172.26.56.2", r["proposal"])
+        self.assertIn("ntp access-group query-only NTP-QUERY-BLOCK",
+                      r["proposal"])
+
+    def test_no_peer_without_servers(self):
+        r = v.analyze_ntp(True, "x", NO_NTP)
+        self.assertNotIn("NTP-SERVERS", r["proposal"])
+        self.assertFalse(v.apply_targets(r)[0].get("peer_added"))
+
+    def test_fix_and_rollback_with_peer(self):
+        r = v.analyze_ntp(True, "x", self.INCLUDE)
+        targets = v.apply_targets(r)
+        self.assertTrue(targets[0]["peer_added"])
+        self.assertEqual(targets[0]["servers"],
+                         ["172.26.56.2", "172.26.56.3"])
+        cmds = v.build_fix_commands(targets, r)
+        self.assertEqual(cmds, [
+            "ip access-list standard NTP-SERVERS",
+            " permit host 172.26.56.2",
+            " permit host 172.26.56.3",
+            " deny   any",
+            " exit",
+            "ntp access-group peer NTP-SERVERS",
+            "ip access-list standard NTP-QUERY-BLOCK",
+            " remark Block unauthenticated NTP mode 6 control queries",
+            " deny   any log",
+            " exit",
+            "ntp access-group query-only NTP-QUERY-BLOCK",
+        ])
+        rb = v.build_rollback_commands(targets, r)
+        self.assertEqual(rb, [
+            "no ntp access-group peer NTP-SERVERS",
+            "no ip access-list standard NTP-SERVERS",
+            "no ip access-list standard NTP-QUERY-BLOCK",
+            "no ntp access-group query-only NTP-QUERY-BLOCK",
+        ])
+
+    def test_rollback_restores_admin_peer_group(self):
+        include = self.INCLUDE + "ntp access-group peer ADMIN-PEERS\n"
+        r = v.analyze_ntp(True, "x", include)
+        rb = v.build_rollback_commands(v.apply_targets(r))
+        self.assertIn("ntp access-group peer ADMIN-PEERS", rb)
+        self.assertLess(rb.index("no ntp access-group peer NTP-SERVERS"),
+                        rb.index("ntp access-group peer ADMIN-PEERS"))
+
+    def test_own_peer_group_not_warned(self):
+        def T(key):
+            return STRINGS["en"].get(key, key)
+
+        include = (self.INCLUDE
+                   + "ntp access-group peer NTP-SERVERS\n"
+                   + "ntp access-group query-only NTP-QUERY-BLOCK\n")
+        r = v.analyze_ntp(True, "x", include)
+        self.assertEqual(v._query_granting_others(r), [])
+        text = "\n".join(t for t, _tag in v.format_result("h", r, T))
+        self.assertNotIn("NTP-SERVERS", text)
 
 
 class ProbePacketTest(unittest.TestCase):

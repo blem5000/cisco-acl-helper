@@ -125,6 +125,7 @@ class ApplyWorkerTest(unittest.TestCase):
             _ssh_debug_log=lambda: None,
         )
         stub._try_rollback = types.MethodType(App._try_rollback, stub)
+        stub._log_cmds = types.MethodType(App._log_cmds, stub)
         stub._put_apply = types.MethodType(App._put_apply, stub)
         stub._apply_worker = types.MethodType(App._apply_worker, stub)
         stub._refresh_and_residual = types.MethodType(

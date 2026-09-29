@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import re
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -399,6 +400,66 @@ class VulnTabMixin:
         ttk.Button(fr, text=self.T("vuln_note_close"),
                    command=dlg.destroy).pack(side="left", padx=6)
 
+    def _log_cmds(self, host: str, kind: str, cmds: list[str],
+                  detail: str = ""):
+        """Append a config-changing batch to the session command history
+        (audit trail, paste-ready via show_cmd_history). Kinds: fix,
+        rollback, save. Defensive: test stubs may lack cmd_history."""
+        hist = getattr(self, "cmd_history", None)
+        if hist is None:
+            hist = self.cmd_history = []
+        hist.append({
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "host": host,
+            "kind": kind,
+            "detail": detail,
+            "cmds": [str(c) for c in cmds],
+        })
+
+    def _collect_cmd_history(self) -> str:
+        """Paste-ready audit trail of issued config commands."""
+        parts = []
+        for e in getattr(self, "cmd_history", None) or []:
+            hdr = f"# {e['ts']} | {e['host']} | {e['kind']}"
+            if e.get("detail"):
+                hdr += f" ({e['detail']})"
+            parts.append(hdr)
+            parts.extend(e["cmds"])
+        return "\n".join(parts)
+
+    def show_cmd_history(self):
+        text = self._collect_cmd_history()
+        if not text.strip():
+            messagebox.showinfo("ACL", self.T("cmd_hist_empty"))
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title(self.T("cmd_hist_title"))
+        dlg.geometry("640x440")
+        dlg.minsize(480, 320)
+        dlg.transient(self)
+        txt_fr = ttk.Frame(dlg)
+        txt_fr.pack(fill="both", expand=True, padx=10, pady=(10, 6))
+        txt = tk.Text(txt_fr, wrap="none", font=("Consolas", 10),
+                      height=12, width=70)
+        ys = ttk.Scrollbar(txt_fr, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ys.set)
+        txt.pack(side="left", fill="both", expand=True)
+        ys.pack(side="right", fill="y")
+        txt.insert("1.0", text)
+        txt.configure(state="disabled")
+        fr = ttk.Frame(dlg)
+        fr.pack(fill="x", padx=10, pady=(0, 10))
+
+        def _copy():
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self._toast(self.T("copied"))
+
+        ttk.Button(fr, text=self.T("vuln_note_copy"), command=_copy).pack(
+            side="left", padx=(0, 6))
+        ttk.Button(fr, text=self.T("vuln_note_close"),
+                   command=dlg.destroy).pack(side="left", padx=6)
+
     # ---------- vulnerabilities: apply the fix (one open session per device)
 
     def start_vuln_apply(self):
@@ -461,7 +522,10 @@ class VulnTabMixin:
         if not targets or not sess.alive():
             return False, None
         try:
-            sess.configure(mod.build_rollback_commands(targets))
+            rb_cmds = mod.build_rollback_commands(targets)
+            sess.configure(rb_cmds)
+            self._log_cmds(sess.host, "rollback", rb_cmds,
+                           getattr(mod, "VULN_ID", ""))
             fresh = mod.fetch_check_session(sess)
         except Exception:
             return False, None
@@ -551,7 +615,11 @@ class VulnTabMixin:
                 applied: list[dict] = []
                 for gname, gtargets in mod.split_fix_groups(targets, res):
                     try:
-                        sess.configure(mod.build_fix_commands(gtargets, res))
+                        fix_cmds = mod.build_fix_commands(gtargets, res)
+                        sess.configure(fix_cmds)
+                        self._log_cmds(
+                            host, "fix", fix_cmds,
+                            f"{getattr(mod, 'VULN_ID', '')}/{gname}")
                         applied.extend(dict(e) for e in gtargets)
                     except cisco_ssh.ConfigFailed as e:
                         if _rejected_unsupported(e):
@@ -643,6 +711,8 @@ class VulnTabMixin:
                     if re.search(r"^%|command rejected", wout,
                                  re.M | re.IGNORECASE):
                         raise RuntimeError(f"write memory failed: {wout}")
+                    self._log_cmds(host, "save", ["write memory"],
+                                   getattr(mod, "VULN_ID", ""))
                     last = [ln for ln in wout.splitlines() if ln.strip()]
                     self._put_apply(
                         [(self.T("vuln_apply_saved").format(
@@ -774,6 +844,10 @@ class VulnTabMixin:
         self.btn_vuln_note = ttk.Button(vbtns, text="",
                                         command=self.show_vuln_notes)
         self.btn_vuln_note.pack(side="left", padx=2)
+        self.btn_vuln_hist = ttk.Button(vbtns, text="",
+                                        command=self.show_cmd_history)
+        self.btn_vuln_hist.pack(side="left", padx=2)
+        self.cmd_history = []
         self.vuln_style = ttk.Style(self)
         self.vuln_style.configure("VulnWork.Horizontal.TProgressbar",
                                   background="gold", thickness=18)
@@ -834,6 +908,7 @@ class VulnTabMixin:
         self.btn_vuln_none.configure(text=S["vuln_select_none"])
         self.btn_vuln_marked.configure(text=S["vuln_marked_btn"])
         self.btn_vuln_note.configure(text=S["vuln_note_btn"])
+        self.btn_vuln_hist.configure(text=S["cmd_hist_btn"])
         self.lbl_vuln_results.configure(text=S["vuln_results_label"])
         self.lbl_vuln_prop.configure(text=S["vuln_proposal_label"])
         self._refresh_vuln_combo()
