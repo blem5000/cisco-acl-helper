@@ -288,6 +288,35 @@ class TrackFoundTest(unittest.TestCase):
         self.assertIsNone(found)
         self.assertEqual(reason, "error")
 
+    def test_unfollowed_neighbor_reports_next(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab = ("  10    aaaa.bbbb.cccc    DYNAMIC     Te1/0/2")
+        cdp = ("--------------------------\nDevice ID: edge-sw\n"
+               "IP address: 10.0.0.9\n"
+               "Interface: TenGigabitEthernet1/0/2,  Port ID (outgoing port): Gi0/2\n"
+               "Platform: cisco WS-C2960\n"
+               "--------------------------\n")
+
+        def run(_self, _dev, cmd, _dbg):
+            if "ip arp" in cmd:
+                return mac_line
+            if "mac address-table" in cmd:
+                return mactab
+            return cdp
+        stub = _worker_stub(run)
+        devices = [{"host": "10.0.0.1"}]  # neighbor NOT listed, manual mode
+        App._track_worker(stub, "10.9.9.9", dict(devices[0]), devices,
+                          False, None)
+        msgs = []
+        while not stub.msg_queue.empty():
+            msgs.append(stub.msg_queue.get_nowait())
+        _ip, found, reason = self._founds(msgs)
+        self.assertEqual(reason, "next")
+        self.assertEqual(found["host"], "10.0.0.1")
+        self.assertEqual(found["port"], "Te1/0/2")
+        self.assertIn("edge-sw", found["via"])
+
 
 class FormatSummaryTest(unittest.TestCase):
     def _stub(self):
@@ -310,6 +339,15 @@ class FormatSummaryTest(unittest.TestCase):
         text = self._stub()._format_track_summary("10.9.9.9", None, "no_arp")
         self.assertIn("10.9.9.9", text)
         self.assertIn("no ARP entry", text)
+
+    def test_next_line_names_direction(self):
+        text = self._stub()._format_track_summary(
+            "10.9.9.9", {"host": "10.0.0.1", "port": "Te1/0/2",
+                         "mac": "aaaa.bbbb.cccc", "via": "edge-sw (10.0.0.9)"},
+            "next")
+        self.assertIn("Te1/0/2", text)
+        self.assertIn("edge-sw", text)
+        self.assertNotIn("found on", text)
 
     def test_unknown_reason_falls_back_to_error(self):
         text = self._stub()._format_track_summary("10.9.9.9", None, "weird")

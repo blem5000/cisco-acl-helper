@@ -106,7 +106,14 @@ class TrackTabMixin:
     def _format_track_summary(self, ip: str, found: dict | None,
                               reason: str) -> str:
         """One-line compact result: where the MAC was found and on which
-        port (or why the address was not found)."""
+        port (or why the address was not found). A "next" reason means the
+        trace stopped before a known neighbor - the MAC is behind that
+        port, not on this device."""
+        if reason == "next" and found:
+            return self.T("track_sum_next").format(
+                ip=ip, mac=found.get("mac", ""),
+                host=found.get("host", ""), port=found.get("port", ""),
+                via=found.get("via", "?"))
         if found:
             return self.T("track_sum_found").format(
                 ip=ip, mac=found.get("mac", ""),
@@ -240,6 +247,7 @@ class TrackTabMixin:
         hop = 0
         done_sent = False
         found: dict | None = None  # last MAC -> port hit (compact summary)
+        via: str | None = None  # CDP neighbor on the last port (unfollowed?)
         reason = "ok"
 
         def _finish(cont_payload):
@@ -247,8 +255,13 @@ class TrackTabMixin:
             nonlocal done_sent
             if not done_sent:
                 done_sent = True
-                rsn = ("step" if cont_payload is not None and not auto
-                       else reason)
+                if cont_payload is not None and not auto:
+                    rsn = "step"
+                elif reason == "ok" and found and via:
+                    rsn = "next"
+                    found["via"] = via
+                else:
+                    rsn = reason
                 self.msg_queue.put(("track_found", (ip, found, rsn)))
                 self.msg_queue.put(("track_done", cont_payload))
 
@@ -275,6 +288,7 @@ class TrackTabMixin:
             hop += 1
             lines = [f"=== {host} : {ip} ==="]
             cont: dict | None = None
+            via = None
             partner_hop = False
             partner = track.find_partner(devices, cur)
             partner_visited = (partner is None
@@ -391,6 +405,14 @@ class TrackTabMixin:
                                 "port": cur.get("port", 22)}
                     if cont is not None:
                         cont["mac"] = mac  # carry over for the next hop
+                    else:
+                        # neighbor known but not followed (manual mode without
+                        # credentials for it) - the MAC is behind this port,
+                        # not ON this device
+                        dev_name = (nb.get("device") or "").strip()
+                        nb_ip = (nb.get("ip") or "").strip()
+                        via = (f"{dev_name} ({nb_ip})".strip()
+                               if dev_name or nb_ip else None)
             except Exception as e:
                 reason = "error"
                 lines.append(f"*** ERROR on {host}: {e} ***")

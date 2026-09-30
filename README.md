@@ -40,8 +40,9 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   automatycznie na sparowanego partnera HA (własne poświadczenia);
    brak wpisu na obu partnerach kończy się stosownym komunikatem.
    Urządzenie startowe w combo już nie podąża za hopami (zostaje wybrane
-   przez operatora). Wynik domyślnie kompaktowy (jedna linia na IP:
-   gdzie znaleziono MAC i na którym porcie); pełne logi hopów włącza
+   przez operatora).    Wynik domyślnie kompaktowy (jedna linia na IP:
+   gdzie znaleziono MAC i na którym porcie; gdy ślad stanie przed znanym
+   sąsiadem, linia mówi „widziany na ... port ... — dalej w kierunku ...”); pełne logi hopów włącza
    checkbox Wyniki rozszerzone. Przycisk Masowo namierza listę adresów
    (po jednym na linię, błędne pomijane z adnotacją) po kolei z tego
    samego urządzenia startowego i z bieżącym ustawieniem auto-kontynuacji
