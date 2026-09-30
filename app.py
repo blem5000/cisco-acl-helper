@@ -903,20 +903,30 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                         pass
                 elif kind == "track_chunk":
                     host, text = payload
-                    if not self.txt_track.get("1.0", tk.END).strip():
-                        self._set_track_text(text)
-                    else:
-                        self._append_track_text(text)
+                    try:
+                        ext = bool(self.track_ext_var.get())
+                    except (tk.TclError, AttributeError):
+                        ext = True
+                    if ext:
+                        if not self.txt_track.get("1.0", tk.END).strip():
+                            self._set_track_text(text)
+                        else:
+                            self._append_track_text(text)
                     if host:
                         self.status.set(self.T("track_working").format(
                             ip=self.ent_track_ip.get().strip(), host=host))
-                        try:
-                            dev = self._lookup_device(host)
-                            if dev is not None:
-                                self.track_dev_var.set(self.dev_label(dev))
-                        except tk.TclError:
-                            pass
+                elif kind == "track_found":
+                    ip, found, reason = payload
+                    if reason != "step":
+                        line = self._format_track_summary(ip, found, reason)
+                        if not self.txt_track.get("1.0", tk.END).strip():
+                            self._set_track_text(line + "\n")
+                        else:
+                            self._append_track_text(line + "\n")
                 elif kind == "track_done":
+                    if getattr(self, "_bulk_active", False):
+                        self.status.set(self.T("status_ready"))
+                        continue
                     cont = payload
                     self.tracking = False
                     self.btn_track.configure(state="normal")

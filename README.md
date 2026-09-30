@@ -38,7 +38,15 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   domyślnie tylko primary z par HA (opcja Wszystkie pokazuje resztę).
   Gdy MAC wypada na porcie port-channel bez sąsiada CDP, ślad przechodzi
   automatycznie na sparowanego partnera HA (własne poświadczenia);
-  brak wpisu na obu partnerach kończy się stosownym komunikatem.
+   brak wpisu na obu partnerach kończy się stosownym komunikatem.
+   Urządzenie startowe w combo już nie podąża za hopami (zostaje wybrane
+   przez operatora). Wynik domyślnie kompaktowy (jedna linia na IP:
+   gdzie znaleziono MAC i na którym porcie); pełne logi hopów włącza
+   checkbox Wyniki rozszerzone. Przycisk Masowo namierza listę adresów
+   (po jednym na linię, błędne pomijane z adnotacją) po kolei z tego
+   samego urządzenia startowego i z bieżącym ustawieniem auto-kontynuacji
+   (domyślnie jeden hop na IP; dalsze hopsy tylko na Twoje żądanie
+   przyciskiem Kontynuuj).
   Pary HA (primary/secondary) definiuje się w edycji urządzenia —
   druga strona linkowana jest automatycznie.
 - **Podatności** — sprawdzanie podatności (nieszyfrowany Telnet:

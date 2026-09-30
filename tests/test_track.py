@@ -220,5 +220,186 @@ class WorkerDoneTest(unittest.TestCase):
         self.assertEqual(_kinds(msgs).count("track_done"), 1)
 
 
+class TrackFoundTest(unittest.TestCase):
+    """The worker emits exactly one structured compact summary."""
+
+    def _founds(self, msgs):
+        founds = [p for k, p in msgs if k == "track_found"]
+        self.assertEqual(len(founds), 1)
+        return founds[0]
+
+    def test_arp_miss_found_none(self):
+        msgs = _drain(_worker_stub(lambda *_a: ""))
+        ip, found, reason = self._founds(msgs)
+        self.assertEqual(ip, "10.9.9.9")
+        self.assertIsNone(found)
+        self.assertEqual(reason, "no_arp")
+
+    def test_manual_continue_reports_step(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab = ("  10    aaaa.bbbb.cccc    DYNAMIC     Gi1/0/5")
+        cdp = ("--------------------------\nDevice ID: sw2\n"
+               "IP address: 10.0.0.2\n"
+               "Interface: GigabitEthernet1/0/5,  Port ID (outgoing port): Gi1/0/1\n"
+               "Platform: cisco WS-C2960X\n"
+               "--------------------------\n")
+
+        def run(_self, _dev, cmd, _dbg):
+            if "ip arp" in cmd:
+                return mac_line
+            if "mac address-table" in cmd:
+                return mactab
+            return cdp
+        msgs = _drain(_worker_stub(run))
+        ip, found, reason = self._founds(msgs)
+        self.assertEqual(reason, "step")  # UI skips intermediate summaries
+        self.assertEqual(found, {"host": "10.0.0.1", "port": "Gi1/0/5",
+                                 "mac": "aaaa.bbbb.cccc"})
+
+    def test_clean_edge_reports_ok(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab = ("  10    aaaa.bbbb.cccc    DYNAMIC     Gi1/0/5")
+
+        def run(_self, _dev, cmd, _dbg):
+            if "ip arp" in cmd:
+                return mac_line
+            if "mac address-table" in cmd:
+                return mactab
+            return ""  # no CDP -> edge device
+        stub = _worker_stub(run)
+        devices = [{"host": "10.0.0.1"}]
+        App._track_worker(stub, "10.9.9.9", dict(devices[0]), devices,
+                          True, None)
+        msgs = []
+        while not stub.msg_queue.empty():
+            msgs.append(stub.msg_queue.get_nowait())
+        ip, found, reason = self._founds(msgs)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(found, {"host": "10.0.0.1", "port": "Gi1/0/5",
+                                 "mac": "aaaa.bbbb.cccc"})
+
+    def test_error_reports_error(self):
+        def run(_self, _dev, cmd, _dbg):
+            raise RuntimeError("ssh gone")
+        msgs = _drain(_worker_stub(run))
+        _ip, found, reason = self._founds(msgs)
+        self.assertIsNone(found)
+        self.assertEqual(reason, "error")
+
+
+class FormatSummaryTest(unittest.TestCase):
+    def _stub(self):
+        stub = types.SimpleNamespace(
+            T=lambda k: STRINGS["en"].get(k, k))
+        stub._format_track_summary = types.MethodType(
+            App._format_track_summary, stub)
+        return stub
+
+    def test_found_line(self):
+        text = self._stub()._format_track_summary(
+            "10.9.9.9", {"host": "10.0.0.1", "port": "Gi1/0/5",
+                         "mac": "aaaa.bbbb.cccc"}, "ok")
+        self.assertIn("10.9.9.9", text)
+        self.assertIn("aaaa.bbbb.cccc", text)
+        self.assertIn("10.0.0.1", text)
+        self.assertIn("Gi1/0/5", text)
+
+    def test_missing_line_uses_reason(self):
+        text = self._stub()._format_track_summary("10.9.9.9", None, "no_arp")
+        self.assertIn("10.9.9.9", text)
+        self.assertIn("no ARP entry", text)
+
+    def test_unknown_reason_falls_back_to_error(self):
+        text = self._stub()._format_track_summary("10.9.9.9", None, "weird")
+        self.assertIn("device error", text)
+
+
+class ParseBulkTest(unittest.TestCase):
+    def test_mixed_input(self):
+        valid, invalid = App._parse_bulk_ips(
+            "10.0.0.1\n  \n999.1.1.1\n10.0.0.2, \n10.0.0.1\n;abc\n")
+        self.assertEqual(valid, ["10.0.0.1", "10.0.0.2"])
+        self.assertEqual(invalid, ["999.1.1.1", "abc"])
+
+    def test_empty(self):
+        self.assertEqual(App._parse_bulk_ips("  \n\n"), ([], []))
+
+
+class BulkWorkerTest(unittest.TestCase):
+    """Bulk repeats manual Trace clicks: same start, caller's settings."""
+
+    def _bulk_stub(self, run_fn):
+        stub = types.SimpleNamespace(
+            msg_queue=queue.Queue(),
+            T=lambda k: STRINGS["en"].get(k, k),
+            _track_stop=threading.Event(),
+        )
+        stub._track_run = types.MethodType(run_fn, stub)
+        stub._track_worker = types.MethodType(App._track_worker, stub)
+        return stub
+
+    def _drain_bulk(self, stub, ips, dev, devices, use_parent):
+        calls = []
+
+        orig = stub._track_run
+
+        def counting(self_, d, cmd, dbg):
+            calls.append((d.get("host", ""), cmd))
+            return orig(d, cmd, dbg)
+
+        stub._track_run = types.MethodType(counting, stub)
+        App._bulk_worker(stub, ips, dev, devices, use_parent, None)
+        msgs = []
+        while not stub.msg_queue.empty():
+            msgs.append(stub.msg_queue.get_nowait())
+        return msgs, calls
+
+    def _script(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab = ("  10    aaaa.bbbb.cccc    DYNAMIC     Gi1/0/5")
+        cdp = ("--------------------------\nDevice ID: sw2\n"
+               "IP address: 10.0.0.2\n"
+               "Interface: GigabitEthernet1/0/5,  Port ID (outgoing port): Gi1/0/1\n"
+               "Platform: cisco WS-C2960X\n"
+               "--------------------------\n")
+
+        def run(_self, _dev, cmd, _dbg):
+            if "ip arp" in cmd:
+                return mac_line
+            if "mac address-table" in cmd:
+                return mactab
+            return cdp
+        return run
+
+    def _devices(self):
+        return [{"host": "10.0.0.1", "partner": "10.0.0.2"},
+                {"host": "10.0.0.2", "partner": "10.0.0.1",
+                 "ha_role": "secondary"}]
+
+    def test_manual_mode_stays_on_start_device(self):
+        devices = self._devices()
+        msgs, calls = self._drain_bulk(
+            self._bulk_stub(self._script()), ["10.9.9.9"],
+            dict(devices[0]), devices, False)
+        # single hop on .1 only (arp + mac + cdp), no chaining to .2
+        self.assertEqual([h for h, _c in calls],
+                         ["10.0.0.1"] * 3)
+        founds = [p for k, p in msgs if k == "track_found"]
+        self.assertEqual(len(founds), 1)
+        self.assertEqual(founds[0][2], "step")
+        self.assertEqual(_kinds(msgs).count("track_done"), 2)
+
+    def test_auto_mode_chains(self):
+        devices = self._devices()
+        msgs, calls = self._drain_bulk(
+            self._bulk_stub(self._script()), ["10.9.9.9"],
+            dict(devices[0]), devices, True)
+        hosts = {h for h, _c in calls}
+        self.assertIn("10.0.0.2", hosts)  # hopped further
+
+
 if __name__ == "__main__":
     unittest.main()
