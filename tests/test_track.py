@@ -128,6 +128,7 @@ def _worker_stub(run_fn, stop_set=None):
         _track_stop=stop_set or threading.Event(),
     )
     stub._track_run = types.MethodType(run_fn, stub)
+    stub._track_hop_run = types.MethodType(App._track_hop_run, stub)
     return stub
 
 
@@ -322,6 +323,59 @@ class TrackFoundTest(unittest.TestCase):
         self.assertEqual(found["host"], "10.0.0.1")
         self.assertEqual(found["port"], "Gi1/0/5")
 
+    def test_parent_creds_fallback_reaches_next_hop(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab1 = ("  10    aaaa.bbbb.cccc    DYNAMIC     Gi1/0/5")
+        mactab2 = ("  10    aaaa.bbbb.cccc    DYNAMIC     Fa0/45")
+        cdp = ("--------------------------\nDevice ID: sw2\n"
+               "IP address: 10.0.0.2\n"
+               "Interface: GigabitEthernet1/0/5,  Port ID (outgoing port): Gi1/0/1\n"
+               "Platform: cisco WS-C2960X\n"
+               "--------------------------\n")
+        seen_users = []
+
+        def run(_self, dev, cmd, _dbg):
+            seen_users.append((dev.get("host"), dev.get("username")))
+            if dev.get("host") == "10.0.0.2" and \
+                    dev.get("username") == "parent":
+                # unknown user dropped by the switch (no clean auth error)
+                raise RuntimeError("Socket EOF during SSH auth")
+            if "ip arp" in cmd:
+                return mac_line if dev.get("host") == "10.0.0.1" else ""
+            if "mac address-table" in cmd:
+                return mactab1 if dev.get("host") == "10.0.0.1" else mactab2
+            return cdp if dev.get("host") == "10.0.0.1" else ""
+        stub = _worker_stub(run)
+        devices = [{"host": "10.0.0.1", "username": "parent",
+                    "password": "p1"},
+                   {"host": "10.0.0.2", "username": "other",
+                    "password": "p2"}]
+        App._track_worker(stub, "10.9.9.9", dict(devices[0]), devices,
+                          True, None)
+        msgs = []
+        while not stub.msg_queue.empty():
+            msgs.append(stub.msg_queue.get_nowait())
+        _ip, found, reason, fail_host = self._founds(msgs)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(found, {"host": "10.0.0.2", "port": "Fa0/45",
+                                 "mac": "aaaa.bbbb.cccc"})
+        users_on_2 = [u for h, u in seen_users if h == "10.0.0.2"]
+        self.assertEqual(users_on_2[0], "parent")  # auto-continue first
+        self.assertIn("other", users_on_2)  # then stored credentials
+        chunks = [p[1] for k, p in msgs if k == "track_chunk"]
+        self.assertTrue(any("stored credentials" in c for c in chunks))
+
+    def test_no_fallback_on_unrelated_error(self):
+        def run(_self, _dev, cmd, _dbg):
+            raise RuntimeError("timed out after 15s")
+        stub = _worker_stub(run)
+        devices = [{"host": "10.0.0.1", "username": "parent"},
+                   {"host": "10.0.0.2", "username": "other"}]
+        with self.assertRaises(RuntimeError):
+            App._track_hop_run(stub, dict(devices[0]), devices, [],
+                               "show ip arp 10.9.9.9", None)
+
     def test_unfollowed_neighbor_reports_next(self):
         mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
                     "Vlan10")
@@ -350,6 +404,22 @@ class TrackFoundTest(unittest.TestCase):
         self.assertEqual(found["host"], "10.0.0.1")
         self.assertEqual(found["port"], "Te1/0/2")
         self.assertIn("edge-sw", found["via"])
+
+
+class LoginErrorTest(unittest.TestCase):
+    def test_login_like(self):
+        for msg in ("Authentication failed for 10.0.0.2: bad password",
+                    "Socket EOF during SSH auth",
+                    "Transport shut down during auth",
+                    "Permission denied (password)"):
+            self.assertTrue(track.looks_login_error(RuntimeError(msg)), msg)
+
+    def test_not_login_like(self):
+        for msg in ("timed out after 15s",
+                    "Cannot reach 10.0.0.2 (TCP/SSH port closed)",
+                    "Host key mismatch",
+                    ""):
+            self.assertFalse(track.looks_login_error(RuntimeError(msg)), msg)
 
 
 class FormatSummaryTest(unittest.TestCase):
@@ -403,9 +473,14 @@ class FormatSummaryTest(unittest.TestCase):
             "10.9.9.9", {"host": "10.0.0.1", "port": "Gi1/0/5",
                          "mac": "aaaa.bbbb.cccc"},
             "error", "10.0.0.2")
-        self.assertIn("device error", text)
+        self.assertIn("10.0.0.2", text)
         self.assertIn("10.0.0.1", text)
         self.assertNotIn("found on", text)
+
+    def test_error_without_hit_names_host(self):
+        text = self._stub()._format_track_summary(
+            "10.9.9.9", None, "error", "10.0.0.1")
+        self.assertIn("10.0.0.1", text)
 
     def test_unknown_reason_falls_back_to_error(self):
         text = self._stub()._format_track_summary("10.9.9.9", None, "weird")
@@ -434,6 +509,7 @@ class BulkWorkerTest(unittest.TestCase):
         )
         stub._track_run = types.MethodType(run_fn, stub)
         stub._track_worker = types.MethodType(App._track_worker, stub)
+        stub._track_hop_run = types.MethodType(App._track_hop_run, stub)
         return stub
 
     def _drain_bulk(self, stub, ips, dev, devices, use_parent):

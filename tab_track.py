@@ -126,12 +126,14 @@ class TrackTabMixin:
                     host=found.get("host", ""),
                     port=found.get("port", ""))
             return text
-        if reason == "error" and found:
-            return (self.T("track_sum_nomac").format(
-                        ip=ip, why=self.T("track_why_err"))
-                    + " " + self.T("track_sum_seen").format(
-                        host=found.get("host", ""),
-                        port=found.get("port", "")))
+        if reason == "error":
+            text = self.T("track_sum_err").format(ip=ip,
+                                                  host=fail_host or "?")
+            if found:
+                text += " " + self.T("track_sum_seen").format(
+                    host=found.get("host", ""),
+                    port=found.get("port", ""))
+            return text
         if found:
             return self.T("track_sum_found").format(
                 ip=ip, mac=found.get("mac", ""),
@@ -249,6 +251,35 @@ class TrackTabMixin:
             self._bulk_active = False
             self.msg_queue.put(("track_done", None))
 
+    def _track_hop_run(self, cur: dict, devices: list, lines: list,
+                       cmd: str, debug_log) -> str:
+        """One hop command with a credential fallback.
+
+        Hops taken with parent credentials fail on boxes with their own
+        login (e.g. a different username) - sometimes as a clean
+        "authentication failed", sometimes as a dropped connection.
+        On a login-like failure, retry once with the listed device's own
+        credentials (when they differ); anything else raises as before.
+        """
+        try:
+            return self._track_run(cur, cmd, debug_log)
+        except Exception as e:
+            if not track.looks_login_error(e):
+                raise
+            host = cur.get("host", "")
+            listed = next((d for d in devices or []
+                           if str(d.get("host", "")) == host), None)
+            if listed is None:
+                raise
+            if all(str(listed.get(k, "")) == str(cur.get(k, ""))
+                   for k in ("username", "password", "enable", "port")):
+                raise  # already on the device's own credentials
+            lines.append(self.T("track_creds_fallback").format(host=host))
+            for k in ("username", "password", "enable", "port"):
+                if k in listed:
+                    cur[k] = listed[k]
+            return self._track_run(cur, cmd, debug_log)
+
     def _track_run(self, dev: dict, cmd: str, debug_log) -> str:
         out = cisco_ssh.run_commands(
             dev["host"], dev["username"], dev.get("password", ""),
@@ -332,7 +363,8 @@ class TrackTabMixin:
                 return True
 
             try:
-                arp_out = self._track_run(cur, f"show ip arp {ip}", debug_log)
+                arp_out = self._track_hop_run(cur, devices, lines,
+                                              f"show ip arp {ip}", debug_log)
                 self.msg_queue.put(("track_prog", 1))
                 if stop.is_set():
                     reason = "stopped"
@@ -362,8 +394,9 @@ class TrackTabMixin:
                 else:
                     lines.append(self.T("track_mac_parent").format(host=host, mac=mac))
 
-                mac_out = self._track_run(cur, f"show mac address-table address {mac}",
-                                           debug_log)
+                mac_out = self._track_hop_run(
+                    cur, devices, lines,
+                    f"show mac address-table address {mac}", debug_log)
                 self.msg_queue.put(("track_prog", 2))
                 if stop.is_set():
                     reason = "stopped"
@@ -391,7 +424,9 @@ class TrackTabMixin:
                     vlan = f"VLAN {e['vlan']}, " if e.get("vlan") else ""
                     lines.append(f"MAC: {mac} -> {e['port']} ({vlan}{e.get('type', '')})".rstrip())
 
-                cdp_out = self._track_run(cur, "show cdp neighbors detail", debug_log)
+                cdp_out = self._track_hop_run(cur, devices, lines,
+                                              "show cdp neighbors detail",
+                                              debug_log)
                 self.msg_queue.put(("track_prog", 3))
                 if stop.is_set():
                     reason = "stopped"

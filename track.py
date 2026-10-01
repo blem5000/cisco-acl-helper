@@ -8,6 +8,18 @@ import re
 _MAC_DOTTED = re.compile(r"[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}")
 _MAC_COLON = re.compile(r"(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
 
+_LOGIN_ERR = re.compile(
+    r"authentication failed|auth fail|eof|transport shut down|"
+    r"connection reset|permission denied|no authentication methods",
+    re.IGNORECASE)
+
+
+def looks_login_error(e: BaseException) -> bool:
+    """Login-like failure (bad creds, dropped handshake) where retrying
+    with a different credential set is worth one attempt. Timeouts and
+    unreachable hosts are excluded - nothing to retry those with."""
+    return bool(_LOGIN_ERR.search(str(e) or ""))
+
 _IFACE_EXPAND = {
     "gigabitethernet": "gigabitethernet",
     "gigabit": "gigabitethernet",
