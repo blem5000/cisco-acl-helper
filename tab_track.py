@@ -510,6 +510,10 @@ class TrackTabMixin:
                                              variable=self.track_all_var,
                                              command=self._refresh_gen_devices)
         self.chk_track_all.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=4)
+        self.track_ext_var = tk.BooleanVar(value=False)
+        self.chk_track_ext = ttk.Checkbutton(tf, text="",
+                                             variable=self.track_ext_var)
+        self.chk_track_ext.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=4)
 
         tbtns = ttk.Frame(self.tab_track)
         tbtns.pack(fill="x", padx=10, pady=(0, 8))
@@ -530,10 +534,6 @@ class TrackTabMixin:
         self.chk_track_parent = ttk.Checkbutton(tbtns, text="",
                                                 variable=self.track_parent_var)
         self.chk_track_parent.pack(side="left", padx=(14, 0))
-        self.track_ext_var = tk.BooleanVar(value=False)
-        self.chk_track_ext = ttk.Checkbutton(tbtns, text="",
-                                             variable=self.track_ext_var)
-        self.chk_track_ext.pack(side="left", padx=(14, 0))
 
         self.lbl_track_results = ttk.Label(self.tab_track, text="")
         self.lbl_track_results.pack(anchor="w", padx=10, pady=(2, 2))

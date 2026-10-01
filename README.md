@@ -92,7 +92,10 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
 Wyłącznie **SSHv2** (Paramiko). Aplikacja próbuje najpierw
 `keyboard-interactive` (wymagane przez utwardzone konfiguracje AAA),
 potem `password`; do tego wspiera legacy kex/hostkey
-(`group1/group14-sha1`, `ssh-rsa`) oraz fallback z AES-GCM na AES-CTR.
+(`group1/group14-sha1`, `ssh-rsa`, implementacje vendoryzowane w `ssh_legacy.py`)
+oferowane ściśle jako last resort (nowoczesne algorytmy zawsze najpierw),
+żeby dogadać się też ze switchami oferującymi wyłącznie group1
+(typowo stare 2960); oraz fallback z AES-GCM na AES-CTR.
 
 ## Wymagania (tylko do budowania)
 
