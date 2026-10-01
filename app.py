@@ -916,9 +916,10 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                         self.status.set(self.T("track_working").format(
                             ip=self.ent_track_ip.get().strip(), host=host))
                 elif kind == "track_found":
-                    ip, found, reason = payload
+                    ip, found, reason, fail_host = payload
                     if reason != "step":
-                        line = self._format_track_summary(ip, found, reason)
+                        line = self._format_track_summary(ip, found, reason,
+                                                          fail_host)
                         if not self.txt_track.get("1.0", tk.END).strip():
                             self._set_track_text(line + "\n")
                         else:

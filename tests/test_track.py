@@ -226,11 +226,12 @@ class TrackFoundTest(unittest.TestCase):
     def _founds(self, msgs):
         founds = [p for k, p in msgs if k == "track_found"]
         self.assertEqual(len(founds), 1)
+        self.assertEqual(len(founds[0]), 4)  # (ip, found, reason, fail_host)
         return founds[0]
 
     def test_arp_miss_found_none(self):
         msgs = _drain(_worker_stub(lambda *_a: ""))
-        ip, found, reason = self._founds(msgs)
+        ip, found, reason, fail_host = self._founds(msgs)
         self.assertEqual(ip, "10.9.9.9")
         self.assertIsNone(found)
         self.assertEqual(reason, "no_arp")
@@ -252,7 +253,7 @@ class TrackFoundTest(unittest.TestCase):
                 return mactab
             return cdp
         msgs = _drain(_worker_stub(run))
-        ip, found, reason = self._founds(msgs)
+        ip, found, reason, fail_host = self._founds(msgs)
         self.assertEqual(reason, "step")  # UI skips intermediate summaries
         self.assertEqual(found, {"host": "10.0.0.1", "port": "Gi1/0/5",
                                  "mac": "aaaa.bbbb.cccc"})
@@ -275,7 +276,7 @@ class TrackFoundTest(unittest.TestCase):
         msgs = []
         while not stub.msg_queue.empty():
             msgs.append(stub.msg_queue.get_nowait())
-        ip, found, reason = self._founds(msgs)
+        ip, found, reason, fail_host = self._founds(msgs)
         self.assertEqual(reason, "ok")
         self.assertEqual(found, {"host": "10.0.0.1", "port": "Gi1/0/5",
                                  "mac": "aaaa.bbbb.cccc"})
@@ -284,9 +285,42 @@ class TrackFoundTest(unittest.TestCase):
         def run(_self, _dev, cmd, _dbg):
             raise RuntimeError("ssh gone")
         msgs = _drain(_worker_stub(run))
-        _ip, found, reason = self._founds(msgs)
+        _ip, found, reason, fail_host = self._founds(msgs)
         self.assertIsNone(found)
         self.assertEqual(reason, "error")
+
+    def test_auth_failure_on_next_hop_reports_auth(self):
+        mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                    "Vlan10")
+        mactab = ("  10    aaaa.bbbb.cccc    DYNAMIC     Gi1/0/5")
+        cdp = ("--------------------------\nDevice ID: sw2\n"
+               "IP address: 10.0.0.2\n"
+               "Interface: GigabitEthernet1/0/5,  Port ID (outgoing port): Gi1/0/1\n"
+               "Platform: cisco WS-C2960X\n"
+               "--------------------------\n")
+
+        def run(_self, dev, cmd, _dbg):
+            if dev.get("host") == "10.0.0.2":
+                raise RuntimeError(
+                    "Authentication failed for 10.0.0.2: bad password")
+            if "ip arp" in cmd:
+                return mac_line
+            if "mac address-table" in cmd:
+                return mactab
+            return cdp
+        stub = _worker_stub(run)
+        devices = [{"host": "10.0.0.1"}, {"host": "10.0.0.2"}]
+        App._track_worker(stub, "10.9.9.9", dict(devices[0]), devices,
+                          True, None)
+        msgs = []
+        while not stub.msg_queue.empty():
+            msgs.append(stub.msg_queue.get_nowait())
+        _ip, found, reason, fail_host = self._founds(msgs)
+        self.assertEqual(reason, "auth")
+        self.assertEqual(fail_host, "10.0.0.2")
+        # stale first-hop hit is kept as context, not as the verdict
+        self.assertEqual(found["host"], "10.0.0.1")
+        self.assertEqual(found["port"], "Gi1/0/5")
 
     def test_unfollowed_neighbor_reports_next(self):
         mac_line = ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
@@ -311,7 +345,7 @@ class TrackFoundTest(unittest.TestCase):
         msgs = []
         while not stub.msg_queue.empty():
             msgs.append(stub.msg_queue.get_nowait())
-        _ip, found, reason = self._founds(msgs)
+        _ip, found, reason, fail_host = self._founds(msgs)
         self.assertEqual(reason, "next")
         self.assertEqual(found["host"], "10.0.0.1")
         self.assertEqual(found["port"], "Te1/0/2")
@@ -347,6 +381,30 @@ class FormatSummaryTest(unittest.TestCase):
             "next")
         self.assertIn("Te1/0/2", text)
         self.assertIn("edge-sw", text)
+        self.assertNotIn("found on", text)
+
+    def test_auth_line_names_failed_host_and_last_seen(self):
+        text = self._stub()._format_track_summary(
+            "10.9.9.9", {"host": "10.0.0.1", "port": "Gi1/0/5",
+                         "mac": "aaaa.bbbb.cccc"},
+            "auth", "10.0.0.2")
+        self.assertIn("10.0.0.2", text)
+        self.assertIn("10.0.0.1", text)
+        self.assertIn("Gi1/0/5", text)
+        self.assertNotIn("found on", text)
+
+    def test_auth_without_prior_hit(self):
+        text = self._stub()._format_track_summary(
+            "10.9.9.9", None, "auth", "10.0.0.1")
+        self.assertIn("10.0.0.1", text)
+
+    def test_error_with_stale_hit_surfaces_error(self):
+        text = self._stub()._format_track_summary(
+            "10.9.9.9", {"host": "10.0.0.1", "port": "Gi1/0/5",
+                         "mac": "aaaa.bbbb.cccc"},
+            "error", "10.0.0.2")
+        self.assertIn("device error", text)
+        self.assertIn("10.0.0.1", text)
         self.assertNotIn("found on", text)
 
     def test_unknown_reason_falls_back_to_error(self):

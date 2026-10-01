@@ -47,7 +47,8 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
    (po jednym na linię, błędne pomijane z adnotacją) po kolei z tego
    samego urządzenia startowego i z bieżącym ustawieniem auto-kontynuacji
    (domyślnie jeden hop na IP; dalsze hopsy tylko na Twoje żądanie
-   przyciskiem Kontynuuj).
+   przyciskiem Kontynuuj). Pad logowania na kolejnym hopie (np. inny
+   username/password) zgłaszany wprost zamiast fałszywego „znaleziony”.
   Pary HA (primary/secondary) definiuje się w edycji urządzenia —
   druga strona linkowana jest automatycznie.
 - **Podatności** — sprawdzanie podatności (nieszyfrowany Telnet:

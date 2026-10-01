@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -104,16 +105,33 @@ class TrackTabMixin:
             self._start_trace(ip, dict(self._track_cont))
 
     def _format_track_summary(self, ip: str, found: dict | None,
-                              reason: str) -> str:
+                              reason: str, fail_host: str | None = None
+                              ) -> str:
         """One-line compact result: where the MAC was found and on which
         port (or why the address was not found). A "next" reason means the
         trace stopped before a known neighbor - the MAC is behind that
-        port, not on this device."""
+        port, not on this device. Failures ("auth"/"error") always surface
+        - even with a stale earlier hit - because that hit is not the
+        endpoint, and the operator must act on the failure."""
         if reason == "next" and found:
             return self.T("track_sum_next").format(
                 ip=ip, mac=found.get("mac", ""),
                 host=found.get("host", ""), port=found.get("port", ""),
                 via=found.get("via", "?"))
+        if reason == "auth":
+            text = self.T("track_sum_auth").format(
+                ip=ip, host=fail_host or "?")
+            if found:
+                text += " " + self.T("track_sum_seen").format(
+                    host=found.get("host", ""),
+                    port=found.get("port", ""))
+            return text
+        if reason == "error" and found:
+            return (self.T("track_sum_nomac").format(
+                        ip=ip, why=self.T("track_why_err"))
+                    + " " + self.T("track_sum_seen").format(
+                        host=found.get("host", ""),
+                        port=found.get("port", "")))
         if found:
             return self.T("track_sum_found").format(
                 ip=ip, mac=found.get("mac", ""),
@@ -248,6 +266,7 @@ class TrackTabMixin:
         done_sent = False
         found: dict | None = None  # last MAC -> port hit (compact summary)
         via: str | None = None  # CDP neighbor on the last port (unfollowed?)
+        fail_host: str | None = None  # device that raised (auth/conn error)
         reason = "ok"
 
         def _finish(cont_payload):
@@ -262,7 +281,8 @@ class TrackTabMixin:
                     found["via"] = via
                 else:
                     rsn = reason
-                self.msg_queue.put(("track_found", (ip, found, rsn)))
+                self.msg_queue.put(("track_found", (ip, found, rsn,
+                                                    fail_host)))
                 self.msg_queue.put(("track_done", cont_payload))
 
         def _stopped_chunk():
@@ -414,7 +434,12 @@ class TrackTabMixin:
                         via = (f"{dev_name} ({nb_ip})".strip()
                                if dev_name or nb_ip else None)
             except Exception as e:
-                reason = "error"
+                if re.search(r"authentication failed", str(e),
+                             re.IGNORECASE):
+                    reason = "auth"
+                else:
+                    reason = "error"
+                fail_host = host
                 lines.append(f"*** ERROR on {host}: {e} ***")
                 self.msg_queue.put(("track_chunk", (host, "\n".join(lines) + "\n")))
                 break
@@ -466,7 +491,7 @@ class TrackTabMixin:
         self.btn_track_cont = ttk.Button(tbtns, text="", command=self.continue_track)
         self.prog_track = ttk.Progressbar(tbtns, mode="determinate", length=150)
         self.prog_track.pack(side="left", padx=(14, 0))
-        self.track_parent_var = tk.BooleanVar(value=False)
+        self.track_parent_var = tk.BooleanVar(value=True)
         self.chk_track_parent = ttk.Checkbutton(tbtns, text="",
                                                 variable=self.track_parent_var)
         self.chk_track_parent.pack(side="left", padx=(14, 0))
