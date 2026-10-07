@@ -8,6 +8,8 @@ from tkinter import messagebox, ttk
 
 import acl_parser
 import cisco_ssh
+import dhcp_check
+import time
 from i18n import STRINGS
 
 
@@ -99,7 +101,85 @@ class AuditTabMixin:
             return
         self._sync_audit_sort()
         entries = self._audit_acls[name]
+        if self.audit_group_var.get():
+            # group people via DHCP reservation descriptions (background:
+            # one PowerShell dump can take seconds on big servers)
+            if self._audit_grouping:
+                return
+            server = self.dhcp_var.get().strip()
+            if not server:
+                messagebox.showwarning("ACL", self.T("audit_noserver"))
+                return
+            self._audit_grouping = True
+            self.btn_audit_optimize.configure(state="disabled")
+            self.audit_prog.pack(side="left", padx=(14, 0))
+            self.audit_prog.start(12)
+            self.status.set(self.T("audit_grouping").format(server=server))
+            threading.Thread(target=self._audit_group_worker,
+                             args=(server, name, list(entries),
+                                   self.audit_sort_side),
+                             daemon=True).start()
+            return
         res = acl_parser.optimize_acl(entries, self.audit_sort_side)
+        self._render_audit_proposal(name, res, grouped=False)
+
+    #: DHCP dump cache: server -> (timestamp, {ip: info}); session-scoped.
+    DHCP_CACHE_TTL = 300
+
+    def _audit_group_worker(self, server: str, name: str,
+                            entries: list, sort_side: str):
+        try:
+            now = time.time()
+            hit = self._dhcp_cache.get(server)
+            if hit is not None and now - hit[0] < self.DHCP_CACHE_TTL:
+                resmap, err = hit[1], ""
+            else:
+                resmap, err = dhcp_check.fetch_all_reservations(server)
+                if not err:
+                    self._dhcp_cache[server] = (now, resmap)
+            if err:
+                self.msg_queue.put(("audit_group_error", (server, err)))
+                return
+
+            def owner_of(ip: str) -> str:
+                info = resmap.get((ip or "").strip())
+                if not info:
+                    return ""
+                return dhcp_check.owner_from_description(
+                    info.get("description", ""))
+
+            res = acl_parser.optimize_acl_by_owner(entries, owner_of,
+                                                   sort_side)
+            self.msg_queue.put(("audit_grouped", (name, res)))
+        except Exception as e:
+            self.msg_queue.put(("audit_group_error", (server, str(e))))
+
+    def _finish_audit_grouped(self, name: str, res: dict):
+        self._audit_grouping = False
+        self.btn_audit_optimize.configure(state="normal")
+        try:
+            self.audit_prog.stop()
+        except tk.TclError:
+            pass
+        self.audit_prog.pack_forget()
+        self.status.set(self.T("status_ready"))
+        if name != self.audit_acl_var.get().strip():
+            return  # user switched ACL meanwhile: drop stale proposal
+        self._render_audit_proposal(name, res, grouped=True)
+
+    def _finish_audit_group_error(self, server: str, err: str):
+        self._audit_grouping = False
+        self.btn_audit_optimize.configure(state="normal")
+        try:
+            self.audit_prog.stop()
+        except tk.TclError:
+            pass
+        self.audit_prog.pack_forget()
+        self.status.set(self.T("status_ready"))
+        messagebox.showerror(
+            "ACL", self.T("audit_group_fail").format(server=server, err=err))
+
+    def _render_audit_proposal(self, name: str, res: dict, grouped: bool):
         new_count = len(res["lines"])
         used = set(range(10, 10 * (new_count + 1), 10))
         out = [f"ip access-list extended {name}"]
@@ -110,9 +190,15 @@ class AuditTabMixin:
         self._audit_proposal = "\n".join(out) + "\n"
         self._set_audit_prop(self._audit_proposal)
         st = res["stats"]
-        self.lbl_audit_stats.configure(text=self.T("audit_stats").format(
-            before=st["before"], after=st["after"], dup=st["dup"],
-            agg=st["merged"], rem=st["remarks"]))
+        if grouped:
+            self.lbl_audit_stats.configure(text=self.T("audit_stats_grouped").format(
+                before=st["before"], after=st["after"], dup=st["dup"],
+                agg=st["merged"], rem=st["remarks"],
+                owners=len(res.get("owners", []))))
+        else:
+            self.lbl_audit_stats.configure(text=self.T("audit_stats").format(
+                before=st["before"], after=st["after"], dup=st["dup"],
+                agg=st["merged"], rem=st["remarks"]))
 
     def copy_audit(self):
         if not self._audit_proposal.strip():
@@ -170,6 +256,10 @@ class AuditTabMixin:
         self.btn_audit_copy.pack(side="left", padx=6)
         self.btn_audit_clear = ttk.Button(abtns, text="", command=self.clear_audit)
         self.btn_audit_clear.pack(side="left", padx=6)
+        self.audit_group_var = tk.BooleanVar(value=False)
+        self.chk_audit_group = ttk.Checkbutton(abtns, text="",
+                                               variable=self.audit_group_var)
+        self.chk_audit_group.pack(side="left", padx=(14, 0))
         self.audit_prog = ttk.Progressbar(abtns, mode="indeterminate", length=120)
 
         self.lbl_audit_cur = ttk.Label(self.tab_audit, text="")
@@ -222,6 +312,7 @@ class AuditTabMixin:
         self.audit_sort_var.set(S["audit_sort_src"] if self.audit_sort_side == "src"
                                 else S["audit_sort_dst"])
         self.btn_audit_optimize.configure(text=S["audit_optimize_btn"])
+        self.chk_audit_group.configure(text=S["audit_group_label"])
         self.btn_audit_copy.configure(text=S["copy_btn"])
         self.btn_audit_clear.configure(text=S["clear_btn"])
         self.lbl_audit_cur.configure(text=S["audit_current_label"])

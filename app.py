@@ -175,6 +175,8 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self._audit_host = ""
         self._audit_proposal = ""
         self._audit_fetching = False
+        self._audit_grouping = False
+        self._dhcp_cache: dict = {}  # server -> (timestamp, {ip: info})
         self._vuln_fetching = False
         self.vuln_results: list[tuple] = []  # (host, result_dict|None, err|None)
         self.vuln_proposal = ""
@@ -963,6 +965,12 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                     self.status.set(self.T("status_ready"))
                     messagebox.showerror(
                         "ACL", self.T("gen_fetch_fail").format(host=host, err=err))
+                elif kind == "audit_grouped":
+                    name, res = payload
+                    self._finish_audit_grouped(name, res)
+                elif kind == "audit_group_error":
+                    server, err = payload
+                    self._finish_audit_group_error(server, err)
                 elif kind == "vlan_list":
                     host, rows = payload
                     self._finish_vlan_fetch(host, rows)

@@ -745,6 +745,97 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
     return {"deletes": deletes, "lines": lines, "stats": stats}
 
 
+def _unit_owner(unit: dict, owner_of) -> str:
+    """Owner of one unit's ACE, "" when unknown.
+
+    `owner_of(ip)` maps a host IP to a person name (e.g. parsed from the
+    DHCP reservation description). Only single-host endpoints resolve:
+    network/wildcard lines (incl. CIDR-aggregated supernets) and opaque
+    shapes never claim an owner. Destination first (IN direction:
+    cameras -> computer), then source (OUT direction).
+    """
+    ace = unit.get("ace")
+    if ace is None or ace.get("kind") not in ("permit", "deny"):
+        return ""
+    for side in ("dst", "src"):
+        ep = ace.get(side, {}) or {}
+        if ep.get("kind") != "host":
+            continue
+        parts = (ep.get("text") or "").split()
+        if len(parts) != 2:
+            continue
+        try:
+            owner = clean_owner(owner_of(parts[1]) or "")
+        except Exception:
+            continue
+        if owner:
+            return owner
+    return ""
+
+
+def optimize_acl_by_owner(entries: list[str], owner_of,
+                          sort_side: str = "src") -> dict:
+    """Like optimize_acl, but wraps each person's entries in remark brackets.
+
+    Runs the regular optimizer first (dedup, CIDR aggregation, safe sort),
+    then stable-groups its units by resolved owner: unknown-owner units
+    (infrastructure lines, aggregated supernets, kept remarks) stay first
+    in original order, then one `remark <owner>` ... entries ...
+    `remark <owner> (koniec)` block per person, owners ordered by first
+    appearance. Everything is renumbered 10, 20, 30...
+
+    Returns optimize_acl's dict plus "owners" (ordered owner list).
+    """
+    res = optimize_acl(entries, sort_side)
+    units = _ace_units(res["lines"])
+    grouped: dict[str, list[dict]] = {}
+    order: list[str] = []
+    plain: list[dict] = []
+    for u in units:
+        owner = _unit_owner(u, owner_of)
+        if not owner:
+            plain.append(u)
+            continue
+        if owner not in grouped:
+            grouped[owner] = []
+            order.append(owner)
+        grouped[owner].append(u)
+    stats = dict(res["stats"])
+    stats["owners"] = len(order)
+    lines: list[str] = []
+    n = 10
+
+    def _emit_unit(u):
+        nonlocal n
+        for r in u["remarks"]:
+            stats["remarks"] += 1
+            lines.append(f"{n} remark {r}")
+            n += 10
+        ace = u.get("ace")
+        if ace is not None and ace.get("kind") in ("permit", "deny", "other"):
+            lines.append(f"{n} {ace['text']}")
+            n += 10
+        for r in u.get("trailing", []):
+            stats["remarks"] += 1
+            lines.append(f"{n} remark {r}")
+            n += 10
+
+    for u in plain:
+        _emit_unit(u)
+    for owner in order:
+        lines.append(f"{n} remark {owner}")
+        stats["remarks"] += 1
+        n += 10
+        for u in grouped[owner]:
+            _emit_unit(u)
+        lines.append(f"{n} remark {owner_end_mark(owner)}")
+        stats["remarks"] += 1
+        n += 10
+    stats["after"] = len(lines)
+    return {"deletes": res["deletes"], "lines": lines, "stats": stats,
+            "owners": order}
+
+
 def build_full_script(pc_ip: str,
                       groups: list[tuple[str, str, str, list]],
                       do_in: bool = True, do_out: bool = True,
