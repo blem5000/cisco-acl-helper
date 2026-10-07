@@ -116,19 +116,21 @@ class GroupByOwnerTest(unittest.TestCase):
                    "50 permit ip host 10.9.9.1 host 10.0.0.21"]
         owners = {"10.0.0.30": "Jan Kowalski", "10.0.0.10": "Jan Kowalski",
                   "10.0.0.20": "Ewa Nowak", "10.0.0.21": "Ewa Nowak"}
-        res = acl_parser.optimize_acl_by_owner(entries, owners.get, "src")
+        res = acl_parser.optimize_acl_by_owner(entries, owners.get)
         self.assertEqual(res["deletes"], [10, 20, 30, 40, 50])
-        self.assertEqual(res["owners"], ["Jan Kowalski", "Ewa Nowak"])
-        self.assertEqual(res["stats"]["owners"], 2)
+        # Ewa's OUT pair aggregates to one /31 (dst-side aggregation),
+        # which has no single owner -> stays ungrouped with the rest
+        self.assertEqual(res["owners"], ["Jan Kowalski"])
+        self.assertEqual(res["stats"]["owners"], 1)
+        self.assertEqual(res["stats"]["merged"], 1)
         texts = [l.split(None, 1)[1] for l in res["lines"]]
         # unknowns first, then stable groups with brackets, sorted inside
         self.assertEqual(texts[0], "permit ip any any")
-        self.assertEqual(texts[1], "remark Jan Kowalski")
-        self.assertEqual(texts[2], "permit ip host 10.0.0.10 host 10.9.9.1")
-        self.assertEqual(texts[3], "permit ip host 10.0.0.30 host 10.9.9.1")
-        self.assertEqual(texts[4], "remark Jan Kowalski (koniec)")
-        self.assertEqual(texts[5], "remark Ewa Nowak")
-        self.assertIn("remark Ewa Nowak (koniec)", texts)
+        self.assertEqual(texts[1], "permit ip host 10.9.9.1 10.0.0.20 0.0.0.1")
+        self.assertEqual(texts[2], "remark Jan Kowalski")
+        self.assertEqual(texts[3], "permit ip host 10.0.0.10 host 10.9.9.1")
+        self.assertEqual(texts[4], "permit ip host 10.0.0.30 host 10.9.9.1")
+        self.assertEqual(texts[5], "remark Jan Kowalski (koniec)")
         seqs = [int(l.split()[0]) for l in res["lines"]]
         self.assertEqual(seqs, list(range(10, 10 * (len(seqs) + 1), 10)))
 
@@ -136,12 +138,34 @@ class GroupByOwnerTest(unittest.TestCase):
         entries = ["10 permit ip host 10.0.0.10 host 10.9.9.1",
                    "20 permit ip host 10.0.0.11 host 10.9.9.1"]
         owners = {"10.0.0.10": "Jan Kowalski", "10.0.0.11": "Jan Kowalski"}
-        res = acl_parser.optimize_acl(entries, "src")
+        res = acl_parser.optimize_acl(entries)
         self.assertEqual(len(res["lines"]), 1)  # collapsed to /31
-        grouped = acl_parser.optimize_acl_by_owner(entries, owners.get,
-                                                    "src")
+        grouped = acl_parser.optimize_acl_by_owner(entries, owners.get)
         self.assertEqual(grouped["owners"], [])
         self.assertIn("0.0.0.1", grouped["lines"][0])  # wildcard, ungrouped
+
+    def test_mixed_directions_sort_both_sides(self):
+        # IN block sorts by source, OUT block by destination (generator-style)
+        entries = ["10 permit ip host 10.0.0.30 host 10.9.9.1",
+                   "20 permit ip host 10.0.0.10 host 10.9.9.1",
+                   "30 permit ip host 10.9.9.1 host 10.0.0.30",
+                   "40 permit ip host 10.9.9.1 host 10.0.0.10"]
+        res = acl_parser.optimize_acl(entries)
+        texts = [l.split(None, 1)[1] for l in res["lines"]]
+        self.assertEqual(texts, [
+            "permit ip host 10.0.0.10 host 10.9.9.1",
+            "permit ip host 10.0.0.30 host 10.9.9.1",
+            "permit ip host 10.9.9.1 host 10.0.0.10",
+            "permit ip host 10.9.9.1 host 10.0.0.30",
+        ])
+
+    def test_out_direction_aggregates(self):
+        entries = ["10 permit ip host 10.9.9.1 host 10.0.0.11",
+                   "20 permit ip host 10.9.9.1 host 10.0.0.10"]
+        res = acl_parser.optimize_acl(entries)
+        self.assertEqual(len(res["lines"]), 1)  # collapsed dst to /31
+        self.assertIn("0.0.0.1", res["lines"][0])
+        self.assertEqual(res["stats"]["merged"], 1)
 
     def test_existing_brackets_rebuilt_once(self):
         # device already has generator brackets (one even mixed-case):
@@ -156,7 +180,7 @@ class GroupByOwnerTest(unittest.TestCase):
         owners = {"10.207.156.206": "Roman Pakholok",
                   "10.207.156.215": "Roman Pakholok",
                   "10.207.156.201": "Artur Lipinski"}
-        res = acl_parser.optimize_acl_by_owner(entries, owners.get, "src")
+        res = acl_parser.optimize_acl_by_owner(entries, owners.get)
         texts = [l.split(None, 1)[1] for l in res["lines"]]
         self.assertEqual(texts.count("remark Roman Pakholok"), 1)
         self.assertEqual(texts.count("remark Roman Pakholok (koniec)"), 1)

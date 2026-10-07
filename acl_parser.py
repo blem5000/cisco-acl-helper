@@ -531,20 +531,15 @@ def _swappable(u1: dict, u2: dict, sort_side: str) -> bool:
     return True
 
 
-def _sort_gen_block(ace_texts: list[str]) -> list[str]:
-    """Sort one generator stanza's ACEs like optimize_acl does, per ACL.
+def _bubble_sort_units(units: list[dict]) -> None:
+    """In-place constrained sort by both endpoints (generator-style).
 
-    Same safety rule as the audit optimizer: only provably swappable
-    pairs (same action/proto/ports/other-side) may change order, so
-    first-match semantics cannot change. Two passes are needed because
-    a generator stanza mixes both directions in one ACL (when
-    ACL-IN == ACL-OUT): the src pass sorts the IN part
-    (permit ip host <cam> host <pc>), the dst pass sorts the OUT part
-    (permit ip host <pc> host <cam>). The other direction, different
-    actions (permit vs deny) and opaque shapes never move.
+    The src pass sorts same-destination groups (IN direction), the dst
+    pass sorts same-source groups (OUT direction). Passes never interfere:
+    pairs moved by one pass share that side's key, so the other pass sees
+    equal keys and leaves them alone. Only provably swappable pairs move,
+    so first-match semantics cannot change.
     """
-    units = _ace_units(ace_texts)
-
     def _key(u, side):
         k = _unit_key(u, side)
         return k[0] if k else None
@@ -559,6 +554,20 @@ def _sort_gen_block(ace_texts: list[str]) -> list[str]:
                         and _swappable(units[i], units[i + 1], side)):
                     units[i], units[i + 1] = units[i + 1], units[i]
                     moved = True
+
+
+def _sort_gen_block(ace_texts: list[str]) -> list[str]:
+    """Sort one generator stanza's ACEs like optimize_acl does, per ACL.
+
+    Same safety rule as the audit optimizer: only provably swappable
+    pairs (same action/proto/ports/other-side) may change order, so
+    first-match semantics cannot change. Both directions sort (src pass
+    for the IN part, dst pass for the OUT part) since a stanza mixes
+    them when ACL-IN == ACL-OUT. Different actions (permit vs deny)
+    and opaque shapes never move.
+    """
+    units = _ace_units(ace_texts)
+    _bubble_sort_units(units)
     out: list[str] = []
     for u in units:
         ace = u.get("ace")
@@ -569,15 +578,17 @@ def _sort_gen_block(ace_texts: list[str]) -> list[str]:
     return out
 
 
-def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
+def optimize_acl(entries: list[str]) -> dict:
     """Propose an optimized version of one ACL's entries.
 
     Safe transforms only: exact-duplicate removal, exact-cover CIDR
     aggregation of host entries (same action/proto/ports/shape, remark-free
-    units), and reordering limited to provably swappable pairs (same
-    action + shape, so first-match semantics cannot change). Remarks stay
-    attached to their entry; closing remarks (`... (koniec)`) additionally
-    absorb following same-shape entries, so the block stays grouped.
+    units, both directions), and reordering limited to provably swappable
+    pairs (same action + shape, so first-match semantics cannot change).
+    Both endpoints sort (src pass for the IN part, dst pass for the OUT
+    part), like the generator stanzas. Remarks stay attached to their
+    entry; closing remarks (`... (koniec)`) additionally absorb following
+    same-shape entries, so the block stays grouped.
     Output is renumbered 10, 20, 30...
 
     Returns {"deletes": [old seqs], "lines": ["10 remark ...", ...],
@@ -585,9 +596,6 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
     """
     import ipaddress as _ip
 
-    if sort_side not in ("src", "dst"):
-        sort_side = "src"
-    other = "dst" if sort_side == "src" else "src"
     units = _ace_units(entries)
     stats = {"before": len(entries or []), "after": 0, "dup": 0,
              "merged": 0, "remarks": 0}
@@ -616,83 +624,75 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
 
     # 2) CIDR aggregation of remark-free all-host groups (exact cover only).
     # Units carrying remarks (incl. trailing closes) stay individual, so
-    # no remark is ever lost inside a merged supernet.
-    groups: dict[tuple, list[int]] = {}
-    for idx, u in enumerate(units):
-        ace = u.get("ace")
-        if (ace is None or ace.get("kind") not in ("permit", "deny")
-                or u["remarks"] or u.get("trailing")
-                or ace[sort_side].get("kind") != "host"):
-            continue
-        gkey = (ace["kind"], ace["proto"], ace[other]["text"],
-                ace["src_opts"], ace["options"])
-        groups.setdefault(gkey, []).append(idx)
-    merged: dict[int, list[dict]] = {}  # old index -> fresh units
-    consumed: set[int] = set()
-    for gkey, idxs in groups.items():
-        if len(idxs) < 2:
-            continue
-        nets = sorted(_ip.ip_network(f"{units[i]['ace'][sort_side]['text'].split()[1]}/32")
-                      for i in idxs)
-        collapsed = sorted(_ip.collapse_addresses(nets))
-        if len(collapsed) >= len(nets):
-            continue  # nothing merges
-        stats["merged"] += len(nets) - len(collapsed)
-        action, proto, other_text, src_opts, options = gkey
-        new_units: list[dict] = []
-        for net in collapsed:
-            if net.prefixlen == 32:
-                ep_text = f"host {net.network_address}"
-            else:
-                ep_text = f"{net.network_address} {net.hostmask}"
-            if sort_side == "src":
-                src_t, dst_t = ep_text, other_text
-            else:
-                src_t, dst_t = other_text, ep_text
-            text = f"{action} {proto} {src_t}"
-            if src_opts:
-                text += f" {src_opts}"
-            text += f" {dst_t}"
-            if options:
-                text += f" {options}"
-            parsed = parse_ace(text)
-            if parsed is None:  # pragma: no cover - built from valid parts
+    # no remark is ever lost inside a merged supernet. Both directions
+    # aggregate (src pass for IN, dst pass for OUT), like the sort below.
+    for sort_side, other in (("src", "dst"), ("dst", "src")):
+        groups: dict[tuple, list[int]] = {}
+        for idx, u in enumerate(units):
+            ace = u.get("ace")
+            if (ace is None or ace.get("kind") not in ("permit", "deny")
+                    or u["remarks"] or u.get("trailing")
+                    or ace[sort_side].get("kind") != "host"):
                 continue
-            new_units.append({"remarks": [], "trailing": [], "ace": parsed})
-        if new_units:
-            merged[idxs[0]] = new_units
-            consumed.update(idxs[1:])
-    if consumed:
-        rebuilt: list[dict] = []
-        for i, u in enumerate(units):
-            if i in consumed:
+            gkey = (ace["kind"], ace["proto"], ace[other]["text"],
+                    ace["src_opts"], ace["options"])
+            groups.setdefault(gkey, []).append(idx)
+        merged: dict[int, list[dict]] = {}  # old index -> fresh units
+        consumed: set[int] = set()
+        for gkey, idxs in groups.items():
+            if len(idxs) < 2:
                 continue
-            if i in merged:
-                rebuilt.extend(merged[i])
-            else:
-                rebuilt.append(u)
-        units = rebuilt
+            nets = sorted(_ip.ip_network(f"{units[i]['ace'][sort_side]['text'].split()[1]}/32")
+                          for i in idxs)
+            collapsed = sorted(_ip.collapse_addresses(nets))
+            if len(collapsed) >= len(nets):
+                continue  # nothing merges
+            stats["merged"] += len(nets) - len(collapsed)
+            action, proto, other_text, src_opts, options = gkey
+            new_units: list[dict] = []
+            for net in collapsed:
+                if net.prefixlen == 32:
+                    ep_text = f"host {net.network_address}"
+                else:
+                    ep_text = f"{net.network_address} {net.hostmask}"
+                if sort_side == "src":
+                    src_t, dst_t = ep_text, other_text
+                else:
+                    src_t, dst_t = other_text, ep_text
+                text = f"{action} {proto} {src_t}"
+                if src_opts:
+                    text += f" {src_opts}"
+                text += f" {dst_t}"
+                if options:
+                    text += f" {options}"
+                parsed = parse_ace(text)
+                if parsed is None:  # pragma: no cover - built from valid parts
+                    continue
+                new_units.append({"remarks": [], "trailing": [],
+                                  "ace": parsed})
+            if new_units:
+                merged[idxs[0]] = new_units
+                consumed.update(idxs[1:])
+        if consumed:
+            rebuilt: list[dict] = []
+            for i, u in enumerate(units):
+                if i in consumed:
+                    continue
+                if i in merged:
+                    rebuilt.extend(merged[i])
+                else:
+                    rebuilt.append(u)
+            units = rebuilt
 
-    # 3) constrained bubble sort by sort-side IP (swappable pairs only)
-    def _key(u):
-        k = _unit_key(u, sort_side)
-        return k[0] if k else None
-
-    moved = True
-    while moved:
-        moved = False
-        for i in range(len(units) - 1):
-            k1, k2 = _key(units[i]), _key(units[i + 1])
-            if (k1 is not None and k2 is not None and k1 > k2
-                    and _swappable(units[i], units[i + 1], sort_side)):
-                units[i], units[i + 1] = units[i + 1], units[i]
-                moved = True
+    # 3) constrained bubble sort by both endpoint IPs (swappable pairs only)
+    _bubble_sort_units(units)
 
     # 3b) hand closing remarks past same-shape followers: crossing a remark
     # never changes packet matching, so `remark X (koniec)` is emitted after
     # same-shape entries that followed it on the device (stays grouped).
-    # Shape ignores the sorted endpoint itself (block members differ in it).
-    def _pull_key(u):
+    # Shape ignores each sorted endpoint in turn (block members differ in
+    # it); remarks never move past entries carrying their own remarks.
+    def _pull_key(u, other):
         ace = u.get("ace")
         if ace is None:
             return None
@@ -701,24 +701,25 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
                     ace["src_opts"], ace["options"])
         return ("other", ace.get("text", ""))
 
-    i = 0
-    while i < len(units):
-        trailing = units[i].get("trailing")
-        if trailing:
-            anchor = _pull_key(units[i])
-            j = i + 1
-            while j < len(units):
-                nxt = units[j]
-                if (nxt["remarks"] or nxt.get("trailing")
-                        or nxt.get("ace") is None):
-                    break
-                if anchor is None or _pull_key(nxt) != anchor:
-                    break
-                j += 1
-            if j - 1 > i:
-                units[j - 1].setdefault("trailing", []).extend(trailing)
-                units[i]["trailing"] = []
-        i += 1
+    for other in ("dst", "src"):
+        i = 0
+        while i < len(units):
+            trailing = units[i].get("trailing")
+            if trailing:
+                anchor = _pull_key(units[i], other)
+                j = i + 1
+                while j < len(units):
+                    nxt = units[j]
+                    if (nxt["remarks"] or nxt.get("trailing")
+                            or nxt.get("ace") is None):
+                        break
+                    if anchor is None or _pull_key(nxt, other) != anchor:
+                        break
+                    j += 1
+                if j - 1 > i:
+                    units[j - 1].setdefault("trailing", []).extend(trailing)
+                    units[i]["trailing"] = []
+            i += 1
 
     # 4) renumber + collect deletes
     deletes: list[int] = []
@@ -786,8 +787,7 @@ def _unit_owner(unit: dict, owner_of) -> str:
     return ""
 
 
-def optimize_acl_by_owner(entries: list[str], owner_of,
-                          sort_side: str = "src") -> dict:
+def optimize_acl_by_owner(entries: list[str], owner_of) -> dict:
     """Like optimize_acl, but wraps each person's entries in remark brackets.
 
     Runs the regular optimizer first (dedup, CIDR aggregation, safe sort),
@@ -799,7 +799,7 @@ def optimize_acl_by_owner(entries: list[str], owner_of,
 
     Returns optimize_acl's dict plus "owners" (ordered owner list).
     """
-    res = optimize_acl(entries, sort_side)
+    res = optimize_acl(entries)
     units = _ace_units(res["lines"])
     grouped: dict[str, list[dict]] = {}
     order: list[str] = []

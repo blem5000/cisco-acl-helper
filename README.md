@@ -34,7 +34,7 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
    edytowalne przed kopiowaniem). Sprawdza też rezerwację DHCP komputera.
 - **Audyt ACL** — pobiera jedną ACL z urządzenia i proponuje wersję
   zoptymalizowaną: bez duplikatów, z agregacją CIDR i bezpiecznym sortowaniem
-  (wg IP źródłowego lub docelowego). Opcja grupowania wg DHCP otacza wpisy
+  obu stron naraz (IN po źródłowym, OUT po docelowym, jak w generatorze). Opcja grupowania wg DHCP otacza wpisy
   każdej osoby klamrą `remark` jak w generatorze, biorąc imię i nazwisko
   z opisu rezerwacji DHCP (znacznik BCS w dowolnym miejscu opisu).
 - **Szukanie adresu** — namierzanie IP: `show ip arp` → MAC →

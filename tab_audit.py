@@ -28,11 +28,6 @@ class AuditTabMixin:
         self.txt_audit_prop.insert("1.0", content)
         self.txt_audit_prop.configure(state="disabled")
 
-    def _sync_audit_sort(self):
-        S = STRINGS[self.lang]
-        self.audit_sort_side = ("dst" if self.audit_sort_var.get() == S["audit_sort_dst"]
-                                else "src")
-
     def fetch_audit_acls(self):
         if self._audit_fetching:
             return
@@ -99,7 +94,6 @@ class AuditTabMixin:
         if not name or name not in self._audit_acls:
             messagebox.showwarning("ACL", self.T("audit_need_acl"))
             return
-        self._sync_audit_sort()
         entries = self._audit_acls[name]
         if self.audit_group_var.get():
             # group people via DHCP reservation descriptions (background:
@@ -116,18 +110,17 @@ class AuditTabMixin:
             self.audit_prog.start(12)
             self.status.set(self.T("audit_grouping").format(server=server))
             threading.Thread(target=self._audit_group_worker,
-                             args=(server, name, list(entries),
-                                   self.audit_sort_side),
+                             args=(server, name, list(entries)),
                              daemon=True).start()
             return
-        res = acl_parser.optimize_acl(entries, self.audit_sort_side)
+        res = acl_parser.optimize_acl(entries)
         self._render_audit_proposal(name, res, grouped=False)
 
     #: DHCP dump cache: server -> (timestamp, {ip: info}); session-scoped.
     DHCP_CACHE_TTL = 300
 
     def _audit_group_worker(self, server: str, name: str,
-                            entries: list, sort_side: str):
+                            entries: list):
         try:
             now = time.time()
             hit = self._dhcp_cache.get(server)
@@ -148,8 +141,7 @@ class AuditTabMixin:
                 return dhcp_check.owner_from_description(
                     info.get("description", ""))
 
-            res = acl_parser.optimize_acl_by_owner(entries, owner_of,
-                                                   sort_side)
+            res = acl_parser.optimize_acl_by_owner(entries, owner_of)
             self.msg_queue.put(("audit_grouped", (name, res)))
         except Exception as e:
             self.msg_queue.put(("audit_group_error", (server, str(e))))
@@ -240,15 +232,6 @@ class AuditTabMixin:
 
         abtns = ttk.Frame(self.tab_audit)
         abtns.pack(fill="x", padx=10, pady=(0, 8))
-        self.lbl_audit_sort = ttk.Label(abtns, text="")
-        self.lbl_audit_sort.pack(side="left")
-        self.audit_sort_side = "src"
-        self.audit_sort_var = tk.StringVar(value="")
-        self.combo_audit_sort = ttk.Combobox(abtns, textvariable=self.audit_sort_var,
-                                             state="readonly", width=16, values=[])
-        self.combo_audit_sort.pack(side="left", padx=(6, 14))
-        self.combo_audit_sort.bind("<<ComboboxSelected>>",
-                                   lambda _e: self._sync_audit_sort())
         self.btn_audit_optimize = ttk.Button(abtns, text="",
                                              command=self.optimize_audit)
         self.btn_audit_optimize.pack(side="left", padx=(0, 6))
@@ -306,11 +289,6 @@ class AuditTabMixin:
         self.lbl_audit_dev.configure(text=S["audit_dev_label"])
         self.btn_audit_fetch.configure(text=S["audit_fetch_btn"])
         self.lbl_audit_acl.configure(text=S["audit_acl_label"])
-        self.lbl_audit_sort.configure(text=S["audit_sort_label"])
-        self.combo_audit_sort.configure(values=[S["audit_sort_src"],
-                                                S["audit_sort_dst"]])
-        self.audit_sort_var.set(S["audit_sort_src"] if self.audit_sort_side == "src"
-                                else S["audit_sort_dst"])
         self.btn_audit_optimize.configure(text=S["audit_optimize_btn"])
         self.chk_audit_group.configure(text=S["audit_group_label"])
         self.btn_audit_copy.configure(text=S["copy_btn"])
