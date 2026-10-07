@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import ipaddress
 import re
 import threading
@@ -240,13 +241,24 @@ class TrackTabMixin:
 
     def _bulk_worker(self, ips: list[str], dev: dict, devices: list,
                      use_parent: bool, debug_log):
-        """Sequential traces; UI unfreezes once, after the last address."""
+        """Parallel traces (up to 5 at once); UI unfreezes once, after the
+        last address. Per-hop chunks are atomic per hop and carry their IP
+        in the header line, so interleaved output stays attributable."""
         try:
-            for ip in ips:
-                if self._track_stop.is_set():
-                    break
-                self._track_worker(ip, dict(dev), devices, use_parent,
-                                   debug_log)
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(5, len(ips))) as ex:
+                futs = [ex.submit(self._track_worker, ip, dict(dev),
+                                  devices, use_parent, debug_log)
+                        for ip in ips]
+                for fut in concurrent.futures.as_completed(futs):
+                    if self._track_stop.is_set():
+                        for f in futs:
+                            f.cancel()
+                        break
+                    try:
+                        fut.result()
+                    except Exception:
+                        pass  # worker reports failures via msg_queue itself
         finally:
             self._bulk_active = False
             self.msg_queue.put(("track_done", None))

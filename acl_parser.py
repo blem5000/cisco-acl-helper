@@ -531,6 +531,44 @@ def _swappable(u1: dict, u2: dict, sort_side: str) -> bool:
     return True
 
 
+def _sort_gen_block(ace_texts: list[str]) -> list[str]:
+    """Sort one generator stanza's ACEs like optimize_acl does, per ACL.
+
+    Same safety rule as the audit optimizer: only provably swappable
+    pairs (same action/proto/ports/other-side) may change order, so
+    first-match semantics cannot change. Two passes are needed because
+    a generator stanza mixes both directions in one ACL (when
+    ACL-IN == ACL-OUT): the src pass sorts the IN part
+    (permit ip host <cam> host <pc>), the dst pass sorts the OUT part
+    (permit ip host <pc> host <cam>). The other direction, different
+    actions (permit vs deny) and opaque shapes never move.
+    """
+    units = _ace_units(ace_texts)
+
+    def _key(u, side):
+        k = _unit_key(u, side)
+        return k[0] if k else None
+
+    for side in ("src", "dst"):
+        moved = True
+        while moved:
+            moved = False
+            for i in range(len(units) - 1):
+                k1, k2 = _key(units[i], side), _key(units[i + 1], side)
+                if (k1 is not None and k2 is not None and k1 > k2
+                        and _swappable(units[i], units[i + 1], side)):
+                    units[i], units[i + 1] = units[i + 1], units[i]
+                    moved = True
+    out: list[str] = []
+    for u in units:
+        ace = u.get("ace")
+        if ace is not None and ace.get("kind") in ("permit", "deny", "other"):
+            out.append(ace["text"])
+        out.extend(f"remark {r}" for r in u.get("remarks", []))
+        out.extend(f"remark {r}" for r in u.get("trailing", []))
+    return out
+
+
 def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
     """Propose an optimized version of one ACL's entries.
 
@@ -800,13 +838,17 @@ def build_full_script(pc_ip: str,
     first_group = True
     for acl in involved:
         old = _reloc(acl)
-        # new nets for this ACL from all groups (IN and OUT sides)
+        # new nets for this ACL from all groups (IN and OUT sides).
+        # Match case-insensitively (like _reloc / involved dedup), so
+        # "CAM-IN" and "cam-in" land in one stanza. Sorting below is
+        # per-ACL (bieżąca ACL-ka): entries from other ACLs never move.
         in_list: list = []
         out_list: list = []
+        low = acl.lower()
         for acl_in, acl_out, _note, nets in groups:
-            if do_in and acl_in == acl:
+            if do_in and acl_in and acl_in.lower() == low:
                 in_list.extend(nets)
-            if do_out and acl_out == acl:
+            if do_out and acl_out and acl_out.lower() == low:
                 out_list.extend(nets)
         if not old and not in_list and not out_list:
             continue
@@ -817,24 +859,27 @@ def build_full_script(pc_ip: str,
         if owner:
             lines.append(f"{alloc(acl)} remark {owner}")
         seen_aces: set[str] = set()  # drop exact duplicates (old vs new overlap)
+        combined: list[str] = []
         for _seq, ace, keep in old:
             if not keep:
                 continue  # stale own remark: deleted above, not re-emitted
             if ace in seen_aces:
                 continue
             seen_aces.add(ace)
-            lines.append(f"{alloc(acl)} {ace}")
+            combined.append(ace)
         for net in in_list:
             ace = f"permit ip {fmt_endpoint(net)} host {pc_ip}"
             if ace in seen_aces:
                 continue
             seen_aces.add(ace)
-            lines.append(f"{alloc(acl)} {ace}")
+            combined.append(ace)
         for net in out_list:
             ace = f"permit ip host {pc_ip} {fmt_endpoint(net)}"
             if ace in seen_aces:
                 continue
             seen_aces.add(ace)
+            combined.append(ace)
+        for ace in _sort_gen_block(combined):
             lines.append(f"{alloc(acl)} {ace}")
         if end_mark:
             lines.append(f"{alloc(acl)} remark {end_mark}")

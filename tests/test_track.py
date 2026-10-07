@@ -572,6 +572,26 @@ class BulkWorkerTest(unittest.TestCase):
         hosts = {h for h, _c in calls}
         self.assertIn("10.0.0.2", hosts)  # hopped further
 
+    def test_parallel_batch_all_report(self):
+        def run(_self, _dev, cmd, _dbg):
+            if "ip arp" in cmd:
+                return ("Internet  10.9.9.9   5   aaaa.bbbb.cccc  ARPA  "
+                        "Vlan10")
+            return ""
+        devices = [{"host": "10.0.0.1"}]
+        stub = self._bulk_stub(run)
+        App._bulk_worker(stub, ["10.9.9.1", "10.9.9.2", "10.9.9.3"],
+                         dict(devices[0]), devices, False, None)
+        msgs = []
+        while not stub.msg_queue.empty():
+            msgs.append(stub.msg_queue.get_nowait())
+        founds = [p for k, p in msgs if k == "track_found"]
+        self.assertEqual(len(founds), 3)
+        self.assertEqual({p[0] for p in founds},
+                         {"10.9.9.1", "10.9.9.2", "10.9.9.3"})
+        # one track_done per trace (suppressed mid-batch) + one final
+        self.assertEqual(_kinds(msgs).count("track_done"), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -120,9 +120,12 @@ class GeneratorTabMixin:
         grouped: list[tuple] = []
         for acl_in, acl_out, note, cam_list in groups:
             if agg:
-                nets = acl_parser.collapse_ips(cam_list)
+                nets = acl_parser.collapse_ips(cam_list)  # already sorted
             else:
-                nets = [ipaddress.ip_network(c + "/32") for c in cam_list]
+                # sort like the aggregated path, so the per-ACL stanza
+                # below (and build_full_script) always emits cam IPs
+                # ascending, independent of paste order
+                nets = sorted(ipaddress.ip_network(c + "/32") for c in cam_list)
             grouped.append((acl_in, acl_out, note, nets))
         fetch_key = (dev_host,
                      tuple((i, o, tuple(str(n) for n in nets)) for i, o, _n, nets in grouped),

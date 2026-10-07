@@ -27,9 +27,11 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
 - **Generator ACL** — dla jednego komputera i wielu kamer generuje gotowy
   skrypt: `conf t` → `resequence … 10 10` → bloki `ip access-list extended`
   (IN: kamery → komputer, OUT: komputer → kamery) → `resequence` ponownie →
-  `end` → `wr`. Sąsiadujące IP agreguje do CIDR (`host` vs `sieć wildcard`),
-  numery sekwencji pobiera z urządzenia przez SSH (wolne, z pomijaniem zajętych,
-  edytowalne przed kopiowaniem). Sprawdza też rezerwację DHCP komputera.
+   `end` → `wr`. Sąsiadujące IP agreguje do CIDR (`host` vs `sieć wildcard`),
+   wpisy w każdej ACL sortuje rosnąco wg IP (IN po źródłowym, OUT po docelowym,
+   tylko bezpieczne przestawienia jak w Audycie), numery sekwencji pobiera
+   z urządzenia przez SSH (wolne, z pomijaniem zajętych,
+   edytowalne przed kopiowaniem). Sprawdza też rezerwację DHCP komputera.
 - **Szukanie adresu** — namierzanie IP: `show ip arp` → MAC →
   `show mac address-table` → port → sąsiad `show cdp neighbors detail`.
   Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada
@@ -47,7 +49,9 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
    (po jednym na linię, błędne pomijane z adnotacją) po kolei z tego
    samego urządzenia startowego i z bieżącym ustawieniem auto-kontynuacji
    (domyślnie jeden hop na IP; dalsze hopsy tylko na Twoje żądanie
-   przyciskiem Kontynuuj). Pad logowania na kolejnym hopie (np. inny
+   przyciskiem Kontynuuj) — ślady lecą równolegle (do 5 naraz, wspólny
+   Stop, odblokowanie raz na końcu; w trybie rozszerzonym bloki hopów
+   mogą się przeplatać, ale każdy niesie swoje IP w nagłówku). Pad logowania na kolejnym hopie (np. inny
    username/password) zgłaszany wprost zamiast fałszywego „znaleziony”;
    przy auto-kontynuacji po padzie poświadczeniami rodzica następuje jedna
    próba zapisanymi danymi urządzenia z listy.
