@@ -167,6 +167,26 @@ class GroupByOwnerTest(unittest.TestCase):
         self.assertIn("0.0.0.1", res["lines"][0])
         self.assertEqual(res["stats"]["merged"], 1)
 
+    def test_halves_mirror_camera_order(self):
+        # fragmented port shapes align row-to-row across IN/OUT blocks;
+        # deny stays a barrier, blocks never interleave
+        entries = ["10 permit tcp host 10.0.0.30 host 10.9.9.1 eq www",
+                   "20 permit tcp host 10.0.0.10 host 10.9.9.1 eq 443",
+                   "30 permit tcp host 10.9.9.1 host 10.0.0.30 eq www",
+                   "40 permit tcp host 10.9.9.1 host 10.0.0.10 eq 443",
+                   "50 deny ip host 10.0.0.99 host 10.9.9.1",
+                   "60 permit tcp host 10.0.0.20 host 10.9.9.1 eq www"]
+        res = acl_parser.optimize_acl(entries)
+        texts = [l.split(None, 1)[1] for l in res["lines"]]
+        self.assertEqual(texts, [
+            "permit tcp host 10.0.0.10 host 10.9.9.1 eq 443",
+            "permit tcp host 10.0.0.30 host 10.9.9.1 eq www",
+            "permit tcp host 10.9.9.1 host 10.0.0.10 eq 443",
+            "permit tcp host 10.9.9.1 host 10.0.0.30 eq www",
+            "deny ip host 10.0.0.99 host 10.9.9.1",
+            "permit tcp host 10.0.0.20 host 10.9.9.1 eq www",
+        ])
+
     def test_existing_brackets_rebuilt_once(self):
         # device already has generator brackets (one even mixed-case):
         # no second pair may stack around them

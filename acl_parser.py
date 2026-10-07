@@ -556,6 +556,71 @@ def _bubble_sort_units(units: list[dict]) -> None:
                     moved = True
 
 
+def _mirror_halves(units: list[dict]) -> None:
+    """In-place mirror: OUT half follows the IN half's camera order.
+
+    Finds the "pc" (most frequent host IP on either side - the fixed
+    endpoint of camera ACLs), then orders host entries of each half by
+    camera IP ascending, so the IN block (`host <cam> host <pc>`) and the
+    OUT block (`host <pc> host <cam>`) read row-to-row. Only same-action
+    pairs within the same half swap (permit/permit and deny/deny always
+    yield the same verdict regardless of order), so first-match semantics
+    cannot change; the other half, permit/deny pairs, infrastructure lines
+    and remarks act as barriers, keeping both blocks intact.
+    """
+    import ipaddress as _ip
+    from collections import Counter
+
+    def _host(ep) -> str | None:
+        if not isinstance(ep, dict) or ep.get("kind") != "host":
+            return None
+        parts = (ep.get("text") or "").split()
+        return parts[1] if len(parts) == 2 else None
+
+    cnt: Counter = Counter()
+    for u in units:
+        ace = u.get("ace")
+        if ace is None or ace.get("kind") not in ("permit", "deny"):
+            continue
+        for side in ("src", "dst"):
+            ip = _host(ace.get(side))
+            if ip:
+                cnt[ip] += 1
+    if not cnt:
+        return
+    pc, n = cnt.most_common(1)[0]
+    if n < 2:
+        return
+
+    def _cam(u) -> tuple | None:
+        """(half, action, cam_ip_int) for pc-centric host entries, else None."""
+        ace = u.get("ace")
+        if ace is None or ace.get("kind") not in ("permit", "deny"):
+            return None
+        src, dst = _host(ace.get("src")), _host(ace.get("dst"))
+        half, cam = None, None
+        if dst == pc and src and src != pc:
+            half, cam = "in", src
+        elif src == pc and dst and dst != pc:
+            half, cam = "out", dst
+        if cam is None:
+            return None
+        try:
+            return (half, ace["kind"], int(_ip.ip_address(cam)))
+        except ValueError:
+            return None
+
+    moved = True
+    while moved:
+        moved = False
+        for i in range(len(units) - 1):
+            a, b = _cam(units[i]), _cam(units[i + 1])
+            if (a is not None and b is not None and a[0] == b[0]
+                    and a[1] == b[1] and a[2] > b[2]):
+                units[i], units[i + 1] = units[i + 1], units[i]
+                moved = True
+
+
 def _sort_gen_block(ace_texts: list[str]) -> list[str]:
     """Sort one generator stanza's ACEs like optimize_acl does, per ACL.
 
@@ -568,6 +633,7 @@ def _sort_gen_block(ace_texts: list[str]) -> list[str]:
     """
     units = _ace_units(ace_texts)
     _bubble_sort_units(units)
+    _mirror_halves(units)
     out: list[str] = []
     for u in units:
         ace = u.get("ace")
@@ -720,6 +786,10 @@ def optimize_acl(entries: list[str]) -> dict:
                     units[j - 1].setdefault("trailing", []).extend(trailing)
                     units[i]["trailing"] = []
             i += 1
+
+    # 3c) mirror halves like the generator stanzas: the OUT half follows
+    # the IN half's camera order (same-action swaps only - see helper).
+    _mirror_halves(units)
 
     # 4) renumber + collect deletes
     deletes: list[int] = []
