@@ -240,6 +240,11 @@ class AuditTabMixin:
         self.btn_audit_clear = ttk.Button(abtns, text="", command=self.clear_audit)
         self.btn_audit_clear.pack(side="left", padx=6)
         self.audit_group_var = tk.BooleanVar(value=False)
+        # lazy import: app.py imports this mixin, so top-level would cycle
+        from app import load_audit_group, save_audit_group
+        self.audit_group_var.set(load_audit_group())
+        self.audit_group_var.trace_add(
+            "write", lambda *_a: save_audit_group(self.audit_group_var.get()))
         self.chk_audit_group = ttk.Checkbutton(abtns, text="",
                                                variable=self.audit_group_var)
         self.chk_audit_group.pack(side="left", padx=(14, 0))

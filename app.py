@@ -92,6 +92,17 @@ def save_dhcp_server(server: str) -> None:
     _write_config(cfg)
 
 
+def load_audit_group() -> bool:
+    v = _read_config().get("audit_group", False)
+    return bool(v) if isinstance(v, bool) else False
+
+
+def save_audit_group(enabled: bool) -> None:
+    cfg = _read_config()
+    cfg["audit_group"] = bool(enabled)
+    _write_config(cfg)
+
+
 def load_putty_path() -> str:
     return str(_read_config().get("putty_path", "") or "")
 
