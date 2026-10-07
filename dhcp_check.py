@@ -235,20 +235,29 @@ def _to_ascii(text: str) -> str:
         "ascii", "ignore").decode("ascii")
 
 
+#: Noise tokens cut from reservation descriptions (word-boundary match,
+#: case-insensitive): department/location tags around the person name.
+_DESC_STOPWORDS = (r"bcs|ww|cctv|bosch|smt|security|uzywany|używany|do|vpn"
+                   r"|lge|com")
+
+
 def owner_from_description(desc: str) -> str:
     """Extract "Imie Nazwisko" from a DHCP reservation description.
 
-    Real-world formats (BCS marker anywhere, dash/dot separators,
-    any case): "BCS - Jan Kowalski", "BCS Jan Kowalski",
-    "BCS - JAN.KOWALSKI", "Jan Kowalski BCS", "jan.kowalski BCS".
-    Result is Title Case ASCII (no Polish characters - IOS remarks):
-    "Łukasz Żółć" -> "Lukasz Zolc".
+    Real-world formats (markers anywhere, dash/dot/comma separators,
+    any case): "BCS - Jan Kowalski", "jan.kowalski@lge.com BCS",
+    "BCS - Jan Kowalski, Cctv Bosch", "Jan Kowalski (Security)".
+    Parenthesized tags, e-mail domains and noise tokens (BCS, WW, CCTV,
+    Bosch, SMT, ...) are cut out. Result is Title Case ASCII
+    (no Polish characters - IOS remarks): "Łukasz Żółć" -> "Lukasz Zolc".
     Returns "" when nothing usable remains (e.g. bare "BCS").
     """
     if not desc:
         return ""
-    text = re.sub(r"(?i)\bbcs\b", " ", desc)
-    text = text.replace(".", " ").replace("-", " ")
+    text = re.sub(r"\([^)]*\)", " ", desc)  # (Security), (R&D), ...
+    text = re.sub(r"@[\w.]+", " ", text)  # @lge.com
+    text = text.replace(".", " ").replace("-", " ").replace(",", " ")
+    text = re.sub(r"(?i)\b(?:" + _DESC_STOPWORDS + r")\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" ,;")
     if not text:
         return ""

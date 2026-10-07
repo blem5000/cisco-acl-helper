@@ -745,6 +745,19 @@ def optimize_acl(entries: list[str], sort_side: str = "src") -> dict:
     return {"deletes": deletes, "lines": lines, "stats": stats}
 
 
+def _is_owner_remark(text: str, owner: str) -> bool:
+    """True when a kept remark is this owner's own bracket line.
+
+    Matches the open form ("Jan Kowalski") and the close form
+    ("Jan Kowalski (koniec)"), case-insensitively, so brackets left by
+    the generator (or older runs) are rebuilt exactly once instead of
+    stacking a second pair around them.
+    """
+    t = (text or "").strip().lower()
+    ol = (owner or "").strip().lower()
+    return bool(ol) and (t == ol or t == ol + " (koniec)")
+
+
 def _unit_owner(unit: dict, owner_of) -> str:
     """Owner of one unit's ACE, "" when unknown.
 
@@ -800,6 +813,24 @@ def optimize_acl_by_owner(entries: list[str], owner_of,
             grouped[owner] = []
             order.append(owner)
         grouped[owner].append(u)
+    if order:
+        # DHCP is the source of truth: drop kept remarks that are this
+        # run's owners' own bracket lines (any case), so an existing
+        # `remark X ... remark X (koniec)` pair is rebuilt exactly once
+        # instead of stacking a second pair around it.
+        owned = set(order)
+
+        def _scrub(u):
+            u["remarks"] = [r for r in u["remarks"]
+                            if not any(_is_owner_remark(r, o) for o in owned)]
+            u["trailing"] = [r for r in u.get("trailing", [])
+                             if not any(_is_owner_remark(r, o) for o in owned)]
+
+        for u in plain:
+            _scrub(u)
+        for owner in order:
+            for u in grouped[owner]:
+                _scrub(u)
     stats = dict(res["stats"])
     stats["owners"] = len(order)
     lines: list[str] = []

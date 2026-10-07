@@ -23,6 +23,20 @@ class OwnerFromDescriptionTest(unittest.TestCase):
             self.assertEqual(dhcp_check.owner_from_description(desc),
                              "Jan Kowalski", desc)
 
+    def test_noise_tokens_cut(self):
+        cases = {
+            "BCS - Jan Kowalski, Cctv Bosch": "Jan Kowalski",
+            "Jan Kowalski (Security) BCS": "Jan Kowalski",
+            "BCS WW Jan Kowalski": "Jan Kowalski",
+            "jan.kowalski@lge.com BCS": "Jan Kowalski",
+            "BCS - Jan Kowalski (R&D)": "Jan Kowalski",
+            "BCS Smt Jan Kowalski": "Jan Kowalski",
+            "BCS - Jan Kowalski Uzywany Do Vpn": "Jan Kowalski",
+        }
+        for desc, want in cases.items():
+            self.assertEqual(dhcp_check.owner_from_description(desc),
+                             want, desc)
+
     def test_empty_and_bare_marker(self):
         for desc in ("", "BCS", "bcs - ", "  -  "):
             self.assertEqual(dhcp_check.owner_from_description(desc), "")
@@ -111,6 +125,28 @@ class GroupByOwnerTest(unittest.TestCase):
                                                     "src")
         self.assertEqual(grouped["owners"], [])
         self.assertIn("0.0.0.1", grouped["lines"][0])  # wildcard, ungrouped
+
+    def test_existing_brackets_rebuilt_once(self):
+        # device already has generator brackets (one even mixed-case):
+        # no second pair may stack around them
+        entries = ["100 remark Roman Pakholok",
+                   "110 permit ip host 10.207.156.206 host 10.204.126.118",
+                   "120 permit ip host 10.207.156.215 host 10.204.126.118",
+                   "130 remark Roman Pakholok (koniec)",
+                   "200 remark ARTUR LIPINSKI",
+                   "210 permit ip host 10.207.156.201 host 10.204.124.185",
+                   "220 remark ARTUR LIPINSKI (koniec)"]
+        owners = {"10.207.156.206": "Roman Pakholok",
+                  "10.207.156.215": "Roman Pakholok",
+                  "10.207.156.201": "Artur Lipinski"}
+        res = acl_parser.optimize_acl_by_owner(entries, owners.get, "src")
+        texts = [l.split(None, 1)[1] for l in res["lines"]]
+        self.assertEqual(texts.count("remark Roman Pakholok"), 1)
+        self.assertEqual(texts.count("remark Roman Pakholok (koniec)"), 1)
+        self.assertEqual(texts.count("remark Artur Lipinski"), 1)
+        self.assertEqual(texts.count("remark Artur Lipinski (koniec)"), 1)
+        self.assertNotIn("remark ARTUR LIPINSKI", texts)
+        self.assertNotIn("remark ARTUR LIPINSKI (koniec)", texts)
 
 
 if __name__ == "__main__":
