@@ -37,6 +37,23 @@ class OwnerFromDescriptionTest(unittest.TestCase):
             self.assertEqual(dhcp_check.owner_from_description(desc),
                              want, desc)
 
+    def test_real_world_descriptions(self):
+        cases = {
+            "BCS.WW - Piotr Strzelec (ZABBIX)": "Piotr Strzelec",
+            "BCS - Kamil Kacpura (Security)": "Kamil Kacpura",
+            "CCTV - Piotr Strzelec": "Piotr Strzelec",
+            "Mariusz Ogrodowczyk - BCS, CCTV BOSCH": "Mariusz Ogrodowczyk",
+            "Mariusz Labus - uzywany do VPN-a i BCS": "Mariusz Labus",
+            "BCS - patryk.jakubowski (R&D)": "Patryk Jakubowski",
+            "BCS - sangoh.jang@lge.com": "Sangoh Jang",
+            "BCS Artur Guziewski SMT": "Artur Guziewski",
+            "BCS Artur Lipinski": "Artur Lipinski",
+            "artur.lipinski - BCS": "Artur Lipinski",
+        }
+        for desc, want in cases.items():
+            self.assertEqual(dhcp_check.owner_from_description(desc),
+                             want, desc)
+
     def test_empty_and_bare_marker(self):
         for desc in ("", "BCS", "bcs - ", "  -  "):
             self.assertEqual(dhcp_check.owner_from_description(desc), "")

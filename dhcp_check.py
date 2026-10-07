@@ -258,6 +258,9 @@ def owner_from_description(desc: str) -> str:
     text = re.sub(r"@[\w.]+", " ", text)  # @lge.com
     text = text.replace(".", " ").replace("-", " ").replace(",", " ")
     text = re.sub(r"(?i)\b(?:" + _DESC_STOPWORDS + r")\b", " ", text)
+    # lone letters are grammar leftovers ("VPN-a i BCS" -> "a", "i"),
+    # never part of a name (initials like "J." lose the dot anyway)
+    text = re.sub(r"(?i)\b[a-ząćęłńóśźż]\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" ,;")
     if not text:
         return ""
