@@ -22,6 +22,7 @@ import vuln_ssh
 import vuln_telnet
 from dialogs import MasterDialog
 from tab_audit import AuditTabMixin
+from tab_ports import PortsTabMixin
 from tab_devices import DevicesTabMixin
 from tab_gen import GeneratorTabMixin
 from tab_search import SearchTabMixin
@@ -103,6 +104,20 @@ def save_audit_group(enabled: bool) -> None:
     _write_config(cfg)
 
 
+def load_ports_months() -> str:
+    v = _read_config().get("ports_months", "3")
+    try:
+        return str(int(v)) if int(v) >= 1 else "3"
+    except (TypeError, ValueError):
+        return "3"
+
+
+def save_ports_months(months: str) -> None:
+    cfg = _read_config()
+    cfg["ports_months"] = (months or "").strip()
+    _write_config(cfg)
+
+
 def load_putty_path() -> str:
     return str(_read_config().get("putty_path", "") or "")
 
@@ -162,7 +177,8 @@ def _write_config(data: dict) -> None:
 
 
 class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
-          GeneratorTabMixin, TrackTabMixin, AuditTabMixin, VulnTabMixin):
+          GeneratorTabMixin, TrackTabMixin, AuditTabMixin, PortsTabMixin,
+          VulnTabMixin):
 
     def __init__(self):
         super().__init__()
@@ -188,6 +204,8 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self._audit_fetching = False
         self._audit_grouping = False
         self._dhcp_cache: dict = {}  # server -> (timestamp, {ip: info})
+        self._ports_fetching = False
+        self._ports_report = ""
         self._vuln_fetching = False
         self.vuln_results: list[tuple] = []  # (host, result_dict|None, err|None)
         self.vuln_proposal = ""
@@ -264,6 +282,8 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
 
         self._build_audit_tab()
 
+        self._build_ports_tab()
+
         self._build_vuln_tab()
 
         # --- Tab 5: settings ---
@@ -322,12 +342,14 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
             self.tab_set, text="", command=lambda: self.check_for_updates(manual=True))
         self.btn_upd_check.pack(anchor="w", padx=14, pady=(8, 0))
 
-        # tab order: search, generator, tracking, audit, vuln, devices, subnets, settings
+        # tab order: search, generator, tracking, audit, ports, vuln, ...
         for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_audit,
-                      self.tab_vuln, self.tab_dev, self.tab_sub, self.tab_set):
+                      self.tab_ports, self.tab_vuln, self.tab_dev, self.tab_sub,
+                      self.tab_set):
             self.nb.forget(_tab)
         for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_audit,
-                      self.tab_vuln, self.tab_dev, self.tab_sub, self.tab_set):
+                      self.tab_ports, self.tab_vuln, self.tab_dev, self.tab_sub,
+                      self.tab_set):
             self.nb.add(_tab, text="")
 
         # status bar + small version stamp on the right
@@ -350,6 +372,7 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self.nb.tab(self.tab_gen, text=S["tab_gen"])
         self.nb.tab(self.tab_track, text=S["tab_track"])
         self.nb.tab(self.tab_audit, text=S["tab_audit"])
+        self.nb.tab(self.tab_ports, text=S["tab_ports"])
         self.nb.tab(self.tab_vuln, text=S["tab_vuln"])
         self.nb.tab(self.tab_dev, text=S["tab_devices"])
         self.nb.tab(self.tab_sub, text=S["tab_subnets"])
@@ -361,6 +384,7 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self._apply_gen_language()
         self._apply_track_language()
         self._apply_audit_language()
+        self._apply_ports_language()
         self._apply_vuln_language()
         self.lbl_lang.configure(text=S["lang_label"])
         self.lbl_master.configure(text=S["master_label"])
@@ -982,6 +1006,13 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                 elif kind == "audit_group_error":
                     server, err = payload
                     self._finish_audit_group_error(server, err)
+                elif kind == "ports_list":
+                    host, months, physical, unused, clearing = payload
+                    self._finish_ports(host, months, physical, unused,
+                                       clearing)
+                elif kind == "ports_error":
+                    host, err = payload
+                    self._finish_ports_error(host, err)
                 elif kind == "vlan_list":
                     host, rows = payload
                     self._finish_vlan_fetch(host, rows)

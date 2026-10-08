@@ -306,6 +306,10 @@ class GeneratorTabMixin:
         if self.sub_dev_var.get() not in labels:
             cur = self._lookup_device(self.sub_dev_var.get().strip())
             self.sub_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
+        self.combo_ports_dev.configure(values=labels)
+        if self.ports_dev_var.get() not in labels:
+            cur = self._lookup_device(self.ports_dev_var.get().strip())
+            self.ports_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
         self._refresh_vuln_devices()
 
     # ---------- IP tracking tab (ARP -> MAC -> port -> CDP) ----------
