@@ -17,6 +17,68 @@ from i18n import STRINGS
 class DevicesTabMixin:
     """Tab-owned App methods (mixed into App)."""
 
+    @staticmethod
+    def search_device_hits(devices: list[dict], query: str) -> list[int]:
+        """Indices of devices matching `query` (mRemoteNG quick-search).
+
+        Case-insensitive substring over hostname, group, host and
+        username, in list order.
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        hits = []
+        for i, d in enumerate(devices or []):
+            hay = " ".join(str(d.get(k, "") or "") for k in
+                           ("hostname", "group", "host", "username")).lower()
+            if q in hay:
+                hits.append(i)
+        return hits
+
+    def _apply_dev_search(self, pos: int | None = None):
+        """Select (and scroll to) a search hit; cycle position."""
+        hits = self.search_device_hits(
+            self.devices, self.dev_search_var.get())
+        self._dev_search_hits = hits
+        if not hits:
+            self._dev_search_pos = 0
+            self.lbl_dev_count.configure(text="")
+            return
+        if pos is None:
+            pos = self._dev_search_pos if self._dev_search_pos < len(hits) \
+                else 0
+        self._dev_search_pos = pos % len(hits)
+        idx = hits[self._dev_search_pos]
+        try:
+            kids = self.tree.get_children()
+            if 0 <= idx < len(kids):
+                self.tree.selection_set(kids[idx])
+                self.tree.see(kids[idx])
+                try:
+                    self.tree.focus(kids[idx])
+                except tk.TclError:
+                    pass
+        except tk.TclError:
+            pass
+        self.lbl_dev_count.configure(
+            text=f"{self._dev_search_pos + 1}/{len(hits)}")
+
+    def _dev_search_step(self, delta: int):
+        """Up/Down arrow: previous/next hit (wraps around)."""
+        if not getattr(self, "_dev_search_hits", None):
+            self._apply_dev_search()
+            return
+        self._apply_dev_search(self._dev_search_pos + delta)
+
+    def _dev_search_key(self, delta: int) -> str:
+        """Entry key handler: step through hits, swallow the key."""
+        self._dev_search_step(delta)
+        return "break"
+
+    def _dev_search_clear(self):
+        self.dev_search_var.set("")
+        self.lbl_dev_count.configure(text="")
+
     def _toggle_audit_at(self, idx: int):
         """Flip the audit flag of one device (devices-tab checkbox column)."""
         if 0 <= idx < len(self.devices):
@@ -332,6 +394,11 @@ class DevicesTabMixin:
                         self.tree.selection_add(iid)
             except tk.TclError:
                 pass
+        try:
+            if self.dev_search_var.get().strip():
+                self._apply_dev_search()  # keep search highlight on refresh
+        except (tk.TclError, AttributeError):
+            pass
         self._update_sort_headers()
         self._refresh_gen_devices()
 
@@ -397,6 +464,28 @@ class DevicesTabMixin:
         self.nb.add(self.tab_dev, text="devices")
         self.lbl_dev = ttk.Label(self.tab_dev, text="")
         self.lbl_dev.pack(anchor="w", padx=10, pady=(10, 4))
+        sfr = ttk.Frame(self.tab_dev)
+        sfr.pack(fill="x", padx=10, pady=(0, 4))
+        self.lbl_dev_search = ttk.Label(sfr, text="")
+        self.lbl_dev_search.pack(side="left")
+        self.dev_search_var = tk.StringVar(value="")
+        self._dev_search_hits: list[int] = []
+        self._dev_search_pos = 0
+        self.ent_dev_search = ttk.Entry(sfr, textvariable=self.dev_search_var,
+                                        width=26)
+        self.ent_dev_search.pack(side="left", padx=(6, 0))
+        self.dev_search_var.trace_add(
+            "write", lambda *_a: self._apply_dev_search(0))
+        self.ent_dev_search.bind("<Down>",
+                                 lambda _e: self._dev_search_key(1))
+        self.ent_dev_search.bind("<Up>",
+                                 lambda _e: self._dev_search_key(-1))
+        self.ent_dev_search.bind("<Return>",
+                                 lambda _e: self._dev_search_key(1))
+        self.ent_dev_search.bind("<Escape>",
+                                 lambda _e: self._dev_search_clear())
+        self.lbl_dev_count = ttk.Label(sfr, text="", foreground="gray")
+        self.lbl_dev_count.pack(side="left", padx=(8, 0))
         cols = ("audit", "hostname", "group", "host", "user", "port")
         self.tree = ttk.Treeview(self.tab_dev, columns=cols, show="headings", height=14)
         self.tree.pack(fill="both", expand=True, padx=10)
@@ -427,6 +516,7 @@ class DevicesTabMixin:
     def _apply_devices_language(self):
         S = STRINGS[self.lang]
         self.lbl_dev.configure(text=S["devices_label"])
+        self.lbl_dev_search.configure(text=S["dev_search_label"])
         self.tree.heading("hostname", text=S["col_hostname"])
         self.tree.heading("group", text=S["col_group"])
         self.tree.heading("host", text=S["col_host"])

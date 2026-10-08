@@ -24,7 +24,8 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
    (nigdy nie duplikowane). Każde urządzenie ma grupę (szafa/lokalizacja)
    do operacji na całej szafie naraz; przycisk **Grupuj** przypisuje grupy
    automatycznie regexem po etykiecie/nazwie hosta (grupa to 1. nawias,
-   z podglądem na żywo, bez nadpisywania ręcznych).
+   z podglądem na żywo, bez nadpisywania ręcznych). Pole **Szukaj** skacze
+   do urządzeń jak w mRemoteNG (strzałki góra/dół po wynikach).
 - **Podsieci** — mapowanie `podsieć (CIDR) → ACL-IN / ACL-OUT` (osobne listy
   dla kierunków in/out).
 - **Generator ACL** — dla jednego komputera i wielu kamer generuje gotowy
