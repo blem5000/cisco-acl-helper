@@ -221,10 +221,14 @@ class DevicesTabMixin:
         if not self.devices:
             messagebox.showwarning("ACL", self.T("status_no_devices"))
             return
-        dlg = GroupDialog(self, self.lang, self.devices)
+        # lazy import: app.py imports this mixin, so top-level would cycle
+        from app import load_group_pattern, save_group_pattern
+        dlg = GroupDialog(self, self.lang, self.devices,
+                          load_group_pattern())
         self.wait_window(dlg)
         if not dlg.result:
             return
+        save_group_pattern(getattr(dlg, "result_pattern", ""))
         n = 0
         for d in self.devices:
             g = dlg.result.get(str(d.get("host", "") or "").strip())

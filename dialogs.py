@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -352,9 +353,9 @@ class SubnetDialog(tk.Toplevel):
 
 
 class GroupDialog(tk.Toplevel):
-    """Modal dialog: auto-assign device groups from hostname/label."""
+    """Modal dialog: auto-assign device groups via editable regex."""
 
-    def __init__(self, parent, lang: str, devices: list):
+    def __init__(self, parent, lang: str, devices: list, initial_pattern: str = ""):
         super().__init__(parent)
         S = STRINGS[lang]
         self._lang = lang
@@ -377,41 +378,34 @@ class GroupDialog(tk.Toplevel):
                         variable=self.src_var,
                         command=self._refresh).pack(side="left")
 
-        ttk.Label(self, text=S["grp_seps_label"]).grid(
+        ttk.Label(self, text=S["grp_regex_label"]).grid(
             row=2, column=0, sticky="w", padx=12, pady=(8, 2))
-        seps_fr = ttk.Frame(self)
-        seps_fr.grid(row=3, column=0, sticky="w", padx=12)
-        self.e_seps = ttk.Entry(seps_fr, width=8, font=("Consolas", 10))
-        self.e_seps.insert(0, "._-")
-        self.e_seps.pack(side="left")
-        self.e_seps.bind("<KeyRelease>", lambda _e: self._refresh())
-        ttk.Label(seps_fr, text=S["grp_parts_label"]).pack(
-            side="left", padx=(12, 4))
-        self.parts_var = tk.StringVar(value="2")
-        self.spin_parts = ttk.Spinbox(seps_fr, from_=1, to=5, width=4,
-                                      textvariable=self.parts_var,
-                                      command=self._refresh)
-        self.spin_parts.pack(side="left")
-        self.spin_parts.bind("<KeyRelease>", lambda _e: self._refresh())
+        self.e_regex = ttk.Entry(self, width=56, font=("Consolas", 10))
+        self.e_regex.grid(row=3, column=0, padx=12, sticky="w")
+        self.e_regex.insert(0, initial_pattern or groups.DEFAULT_PATTERN)
+        self.e_regex.bind("<KeyRelease>", lambda _e: self._refresh())
+        ttk.Label(self, text=S["grp_regex_hint"], foreground="gray",
+                  wraplength=430, justify="left").grid(
+                      row=4, column=0, sticky="w", padx=12, pady=(2, 0))
 
         self.scope_var = tk.StringVar(value="empty")
         ttk.Radiobutton(self, text=S["grp_only_empty"], value="empty",
                         variable=self.scope_var,
                         command=self._refresh).grid(
-                            row=4, column=0, sticky="w", padx=12, pady=(8, 0))
+                            row=5, column=0, sticky="w", padx=12, pady=(8, 0))
         ttk.Radiobutton(self, text=S["grp_all"], value="all",
                         variable=self.scope_var,
                         command=self._refresh).grid(
-                            row=5, column=0, sticky="w", padx=12)
+                            row=6, column=0, sticky="w", padx=12)
 
         self.lbl_count = ttk.Label(self, text="", foreground="blue")
-        self.lbl_count.grid(row=6, column=0, sticky="w", padx=12, pady=(8, 0))
+        self.lbl_count.grid(row=7, column=0, sticky="w", padx=12, pady=(8, 0))
         self.txt = tk.Text(self, width=64, height=12, font=("Consolas", 9),
                            state="disabled")
-        self.txt.grid(row=7, column=0, padx=12, pady=(2, 0))
+        self.txt.grid(row=8, column=0, padx=12, pady=(2, 0))
 
         fr = ttk.Frame(self)
-        fr.grid(row=8, column=0, pady=12)
+        fr.grid(row=9, column=0, pady=12)
         ttk.Button(fr, text=S["ok_btn"], command=self._on_ok).pack(
             side="left", padx=6)
         ttk.Button(fr, text=S["cancel_btn"], command=self.destroy).pack(
@@ -420,20 +414,26 @@ class GroupDialog(tk.Toplevel):
         self._refresh()
 
     def _current(self) -> dict[str, str]:
-        try:
-            parts = int(self.parts_var.get().strip() or "2")
-        except ValueError:
-            parts = 2
-        return groups.auto_assign(
-            self._devices, self.src_var.get(), self.e_seps.get(), parts,
+        return groups.auto_assign_regex(
+            self._devices, self.src_var.get(), self.e_regex.get(),
             self.scope_var.get() == "empty")
 
     def _refresh(self):
         S = STRINGS[self._lang]
-        proposed = self._current()
+        try:
+            proposed = self._current()
+            err = ""
+        except re.error as e:
+            proposed, err = {}, str(e)
         self._proposed = proposed
-        self.lbl_count.configure(
-            text=S["grp_preview_count"].format(n=len(proposed)))
+        if err:
+            self.lbl_count.configure(
+                text=S["grp_bad_regex"].format(err=err[:80]),
+                foreground="red")
+        else:
+            self.lbl_count.configure(
+                text=S["grp_preview_count"].format(n=len(proposed)),
+                foreground="blue")
         lines = []
         for d in self._devices:
             host = str(d.get("host", "") or "").strip()
@@ -451,8 +451,15 @@ class GroupDialog(tk.Toplevel):
 
     def _on_ok(self):
         S = STRINGS[self._lang]
-        if not self._current():
+        try:
+            proposed = self._current()
+        except re.error:
+            messagebox.showwarning(
+                "ACL", S["grp_bad_regex"].format(err="..."))
+            return
+        if not proposed:
             messagebox.showwarning("ACL", S["grp_none"])
             return
-        self.result = self._current()
+        self.result = proposed
+        self.result_pattern = self.e_regex.get()
         self.destroy()

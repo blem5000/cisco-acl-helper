@@ -144,6 +144,17 @@ def save_ports_scope(scope: str, group: str = "") -> None:
     _write_config(cfg)
 
 
+def load_group_pattern() -> str:
+    import groups as _g
+    return str(_read_config().get("group_pattern", _g.DEFAULT_PATTERN) or "")
+
+
+def save_group_pattern(pattern: str) -> None:
+    cfg = _read_config()
+    cfg["group_pattern"] = pattern or ""
+    _write_config(cfg)
+
+
 def load_putty_path() -> str:
     return str(_read_config().get("putty_path", "") or "")
 
