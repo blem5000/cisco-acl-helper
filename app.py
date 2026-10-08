@@ -129,6 +129,21 @@ def save_ports_sfp(skip: bool) -> None:
     _write_config(cfg)
 
 
+def load_ports_scope() -> tuple[str, str]:
+    cfg = _read_config()
+    scope = str(cfg.get("ports_scope", "dev") or "dev")
+    if scope not in ("dev", "rack"):
+        scope = "dev"
+    return scope, str(cfg.get("ports_group", "") or "")
+
+
+def save_ports_scope(scope: str, group: str = "") -> None:
+    cfg = _read_config()
+    cfg["ports_scope"] = scope if scope in ("dev", "rack") else "dev"
+    cfg["ports_group"] = (group or "").strip()
+    _write_config(cfg)
+
+
 def load_putty_path() -> str:
     return str(_read_config().get("putty_path", "") or "")
 
@@ -1024,6 +1039,9 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                 elif kind == "ports_error":
                     host, err = payload
                     self._finish_ports_error(host, err)
+                elif kind == "ports_rack_list":
+                    group, months, ordered = payload
+                    self._finish_ports_rack(group, months, ordered)
                 elif kind == "vlan_list":
                     host, rows = payload
                     self._finish_vlan_fetch(host, rows)

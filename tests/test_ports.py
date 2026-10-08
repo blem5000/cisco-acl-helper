@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ports
+import tab_ports
 
 SAMPLE = """
 GigabitEthernet1/0/1 is up, line protocol is up (connected)
@@ -138,6 +139,30 @@ class FindUnusedTest(unittest.TestCase):
     def test_common_clearing(self):
         ifs = ports.parse_show_interfaces(SAMPLE)
         self.assertEqual(ports.common_clearing(ifs), "never")
+
+
+class RackHelpersTest(unittest.TestCase):
+    DEVS = [{"host": "10.0.0.2", "group": "Serwerownia"},
+            {"host": "10.0.0.1", "group": "Serwerownia"},
+            {"host": "10.0.0.3", "group": ""},
+            {"host": "10.0.0.4"},
+            {"host": "10.0.0.5", "group": "Magazyn"},
+            {"host": "", "group": "Serwerownia"}]
+
+    def test_names_sorted_unique(self):
+        self.assertEqual(tab_ports.rack_names(self.DEVS),
+                         ["Magazyn", "Serwerownia"])
+        self.assertEqual(tab_ports.rack_names([]), [])
+
+    def test_devices_in_list_order_skip_empty_host(self):
+        got = [d["host"] for d in tab_ports.rack_devices(self.DEVS,
+                                                         "Serwerownia")]
+        self.assertEqual(got, ["10.0.0.2", "10.0.0.1"])
+        self.assertEqual(tab_ports.rack_devices(self.DEVS, "Brak"), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
 
     def test_status_types_real_world(self):
         status = ("Port      Name               Status       Vlan       Duplex  Speed Type\n"

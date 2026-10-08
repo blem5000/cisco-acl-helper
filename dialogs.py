@@ -159,8 +159,14 @@ class DeviceDialog(tk.Toplevel):
         ttk.Radiobutton(role_fr, text=S["role_secondary"], value="secondary",
                         variable=self.role_var).pack(side="left")
 
+        ttk.Label(self, text=S["fld_group"]).grid(row=17, column=0, sticky="w",
+                                                  padx=12, pady=(8, 2))
+        self.e_group = ttk.Entry(self, width=32)
+        self.e_group.grid(row=18, column=0, columnspan=2, padx=12)
+        self.e_group.insert(0, init.get("group", ""))
+
         fr = ttk.Frame(self)
-        fr.grid(row=17, column=0, columnspan=2, pady=14)
+        fr.grid(row=19, column=0, columnspan=2, pady=14)
         ttk.Button(fr, text=S["ok_btn"], command=self._on_ok).pack(side="left", padx=6)
         ttk.Button(fr, text=S["cancel_btn"], command=self.destroy).pack(side="left", padx=6)
         self.transient(parent)
@@ -191,6 +197,7 @@ class DeviceDialog(tk.Toplevel):
             "password": self.e_pass.get(),
             "enable": self.e_enable.get(),
             "l3": bool(self.l3_var.get()),
+            "group": self.e_group.get().strip(),
             "partner": "",
             "ha_role": "",
         }

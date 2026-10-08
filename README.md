@@ -20,8 +20,9 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   hostname="…" username="…" password="…" port="…" enable="…"/>` lub
   `<device><host>…</host>…</device>`, ewentualnie sama lista `<host>`).
   Jeden login/hasło/enable z dialogu pokrywa cały import (uzupełnia braki,
-  opcjonalnie nadpisuje wszystko), a IP już będące na liście są pomijane
-  (nigdy nie duplikowane).
+   opcjonalnie nadpisuje wszystko), a IP już będące na liście są pomijane
+   (nigdy nie duplikowane). Każde urządzenie ma grupę (szafa/lokalizacja)
+   do operacji na całej szafie naraz.
 - **Podsieci** — mapowanie `podsieć (CIDR) → ACL-IN / ACL-OUT` (osobne listy
   dla kierunków in/out).
 - **Generator ACL** — dla jednego komputera i wielu kamer generuje gotowy
@@ -39,9 +40,10 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   z opisu rezerwacji DHCP (znacznik BCS w dowolnym miejscu opisu).
 - **Porty** — znajduje na urządzeniu porty fizyczne nieużywane od X miesięcy
   (brak ruchu w obie strony wg `Last input/output` z `show interfaces`,
-  miesiąc = 30 dni; porty SFP/uplink pomijane, do włączenia): ile ich jest
-  i które to, ze statusem, ostatnim ruchem i opisem. Próg miesięcy
-  pamiętany między uruchomieniami.
+  miesiąc = 30 dni; porty SFP/uplink i management pomijane, do włączenia):
+  ile ich jest i które to, ze statusem, ostatnim ruchem i opisem. Próg
+  miesięcy pamiętany między uruchomieniami. Potrafi sprawdzić całą szafę
+  naraz (raport per switch + suma).
 - **Szukanie adresu** — namierzanie IP: `show ip arp` → MAC →
   `show mac address-table` → port → sąsiad `show cdp neighbors detail`.
   Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada

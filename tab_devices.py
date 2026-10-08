@@ -295,7 +295,8 @@ class DevicesTabMixin:
             self.tree.delete(i)
         for d in self.devices:
             mark = "\u2611" if d.get("audit", True) else "\u2610"
-            self.tree.insert("", "end", values=(mark, d.get("hostname", ""), d.get("host", ""),
+            self.tree.insert("", "end", values=(mark, d.get("hostname", ""),
+                                                d.get("group", ""), d.get("host", ""),
                                                 d.get("username", ""), d.get("port", 22)))
         if sel_hosts:
             try:
@@ -326,6 +327,7 @@ class DevicesTabMixin:
             reverse = False
         keys = {
             "hostname": lambda d: (d.get("hostname", "") or "").lower(),
+            "group": lambda d: (d.get("group", "") or "").lower(),
             "host": lambda d: self._host_key(d.get("host", "")),
             "user": lambda d: (d.get("username", "") or "").lower(),
             "port": lambda d: (int(d.get("port", 22) or 22)
@@ -339,7 +341,8 @@ class DevicesTabMixin:
 
     def _update_sort_headers(self):
         """Arrow (asc/desc) on the sorted column; plain text otherwise."""
-        dev_heads = {"hostname": self.T("col_hostname"), "host": self.T("col_host"),
+        dev_heads = {"hostname": self.T("col_hostname"), "group": self.T("col_group"),
+                     "host": self.T("col_host"),
                      "user": self.T("col_user"), "port": self.T("col_port")}
         for col, base in dev_heads.items():
             try:
@@ -369,7 +372,7 @@ class DevicesTabMixin:
         self.nb.add(self.tab_dev, text="devices")
         self.lbl_dev = ttk.Label(self.tab_dev, text="")
         self.lbl_dev.pack(anchor="w", padx=10, pady=(10, 4))
-        cols = ("audit", "hostname", "host", "user", "port")
+        cols = ("audit", "hostname", "group", "host", "user", "port")
         self.tree = ttk.Treeview(self.tab_dev, columns=cols, show="headings", height=14)
         self.tree.pack(fill="both", expand=True, padx=10)
         self.tree.bind("<Double-1>", self._on_dev_double_click)
@@ -377,7 +380,7 @@ class DevicesTabMixin:
         self.tree.bind("<space>", self._on_dev_space)
         self.tree.column("audit", width=44, minwidth=44, stretch=False, anchor="center")
         self.tree.heading("audit", text="\u2713", command=self.toggle_all_audit)
-        for _c in ("hostname", "host", "user", "port"):
+        for _c in ("hostname", "group", "host", "user", "port"):
             self.tree.heading(_c, command=lambda c=_c: self.sort_devices(c))
         dbtns = ttk.Frame(self.tab_dev)
         dbtns.pack(fill="x", padx=10, pady=10)
@@ -398,6 +401,7 @@ class DevicesTabMixin:
         S = STRINGS[self.lang]
         self.lbl_dev.configure(text=S["devices_label"])
         self.tree.heading("hostname", text=S["col_hostname"])
+        self.tree.heading("group", text=S["col_group"])
         self.tree.heading("host", text=S["col_host"])
         self.tree.heading("user", text=S["col_user"])
         self.tree.heading("port", text=S["col_port"])
