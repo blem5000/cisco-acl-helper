@@ -32,11 +32,27 @@ _LAST_CLEAR = re.compile(
     re.IGNORECASE | re.MULTILINE)
 
 
+#: SFP/transceiver uplink families (skipped by default in the report).
+_SFP = (
+    "tengigabitethernet", "tengig", "ten", "te",
+    "twentyfivegige", "twentyfivegigabitethernet", "twentyfivegig", "twe",
+    "fortygigabitethernet", "fortygig", "fortygige", "fo",
+    "hundredgige", "hundredgig", "hu",
+)
+
+
 def is_physical(name: str) -> bool:
     """Physical ethernet port (excludes Vlan/Port-channel/Loopback/...)."""
     s = (name or "").strip().lower().replace(" ", "")
     m = re.match(r"^([a-z\-]+)", s)
     return bool(m) and m.group(1) in _PHYSICAL
+
+
+def is_sfp(name: str) -> bool:
+    """Transceiver (uplink) port: Te/Twe/Fo/Hu families."""
+    s = (name or "").strip().lower().replace(" ", "")
+    m = re.match(r"^([a-z\-]+)", s)
+    return bool(m) and m.group(1) in _SFP
 
 
 def parse_age(text: str) -> float | None:
@@ -115,16 +131,20 @@ def parse_show_interfaces(output: str) -> list[dict]:
     return found
 
 
-def find_unused(interfaces: list[dict], months: float) -> list[dict]:
+def find_unused(interfaces: list[dict], months: float,
+                skip_sfp: bool = True) -> list[dict]:
     """Physical ports with no input AND no output within `months`.
 
     "never" (None age) always counts as older than the threshold.
-    Keeps device order.
+    SFP/uplink ports are skipped by default. Keeps device order.
     """
     threshold = months * MONTH_DAYS * 86400
     out: list[dict] = []
     for e in interfaces or []:
-        if not is_physical(e.get("name", "")):
+        name = e.get("name", "")
+        if not is_physical(name):
+            continue
+        if skip_sfp and is_sfp(name):
             continue
         age_in = parse_age(e.get("last_input", ""))
         age_out = parse_age(e.get("last_output", ""))

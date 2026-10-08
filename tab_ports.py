@@ -58,9 +58,10 @@ class PortsTabMixin:
         self.ports_prog.start(12)
         self.status.set(self.T("ports_fetching").format(host=dev["host"]))
         threading.Thread(target=self._ports_worker,
-                         args=(dev, months), daemon=True).start()
+                         args=(dev, months, self.ports_sfp_var.get()),
+                         daemon=True).start()
 
-    def _ports_worker(self, dev: dict, months: int):
+    def _ports_worker(self, dev: dict, months: int, skip_sfp: bool):
         try:
             res = cisco_ssh.run_commands(
                 dev["host"], dev["username"], dev.get("password", ""),
@@ -72,15 +73,17 @@ class PortsTabMixin:
                 raise RuntimeError("Empty response - check privileges.")
             ifs = ports_mod.parse_show_interfaces(out)
             physical = [e for e in ifs if ports_mod.is_physical(e.get("name", ""))]
-            unused = ports_mod.find_unused(physical, months)
+            skipped = sum(1 for e in physical
+                          if skip_sfp and ports_mod.is_sfp(e.get("name", "")))
+            unused = ports_mod.find_unused(physical, months, skip_sfp)
             self.msg_queue.put(("ports_list", (dev["host"], months, physical,
-                                              unused,
+                                              unused, skipped,
                                               ports_mod.common_clearing(ifs))))
         except Exception as e:
             self.msg_queue.put(("ports_error", (dev["host"], str(e))))
 
     def _finish_ports(self, host: str, months: int, physical: list,
-                      unused: list, clearing: str):
+                      unused: list, skipped: int, clearing: str):
         self._ports_fetching = False
         self.btn_ports_check.configure(state="normal")
         try:
@@ -89,11 +92,14 @@ class PortsTabMixin:
             pass
         self.ports_prog.pack_forget()
         self.status.set(self.T("status_ready"))
+        checked = len(physical) - skipped
         lines = [self.T("device_hdr").format(host=host)]
         if clearing:
             lines.append(self.T("ports_clearing").format(v=clearing))
         lines.append(self.T("ports_summary").format(m=months, n=len(unused),
-                                                    total=len(physical)))
+                                                    total=checked))
+        if skipped:
+            lines.append(self.T("ports_sfp_note").format(n=skipped))
         lines.append("")
         for e in unused:
             desc = f"  {e['description']}" if e.get("description") else ""
@@ -105,7 +111,7 @@ class PortsTabMixin:
         self._ports_report = "\n".join(lines) + "\n"
         self._set_ports_text(self._ports_report)
         self.lbl_ports_stats.configure(text=self.T("ports_summary").format(
-            m=months, n=len(unused), total=len(physical)))
+            m=months, n=len(unused), total=checked))
 
     def _finish_ports_error(self, host: str, err: str):
         self._ports_fetching = False
@@ -147,6 +153,16 @@ class PortsTabMixin:
         self.btn_ports_check = ttk.Button(pf, text="",
                                           command=self.check_ports)
         self.btn_ports_check.grid(row=1, column=2, padx=8)
+        self.ports_sfp_var = tk.BooleanVar(value=True)
+        # lazy import: app.py imports this mixin, so top-level would cycle
+        from app import load_ports_sfp, save_ports_sfp
+        self.ports_sfp_var.set(load_ports_sfp())
+        self.ports_sfp_var.trace_add(
+            "write", lambda *_a: save_ports_sfp(self.ports_sfp_var.get()))
+        self.chk_ports_sfp = ttk.Checkbutton(pf, text="",
+                                             variable=self.ports_sfp_var)
+        self.chk_ports_sfp.grid(row=2, column=0, columnspan=3, sticky="w",
+                                pady=(6, 0))
 
         pbtns = ttk.Frame(self.tab_ports)
         pbtns.pack(fill="x", padx=10, pady=(0, 8))
@@ -185,6 +201,7 @@ class PortsTabMixin:
         self.lbl_ports_dev.configure(text=S["ports_dev_label"])
         self.lbl_ports_months.configure(text=S["ports_months_label"])
         self.btn_ports_check.configure(text=S["ports_check_btn"])
+        self.chk_ports_sfp.configure(text=S["ports_sfp_label"])
         self.btn_ports_copy.configure(text=S["copy_btn"])
         self.btn_ports_clear.configure(text=S["clear_btn"])
         self.lbl_ports_results.configure(text=S["results_label"])

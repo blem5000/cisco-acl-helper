@@ -118,6 +118,17 @@ def save_ports_months(months: str) -> None:
     _write_config(cfg)
 
 
+def load_ports_sfp() -> bool:
+    v = _read_config().get("ports_skip_sfp", True)
+    return bool(v) if isinstance(v, bool) else True
+
+
+def save_ports_sfp(skip: bool) -> None:
+    cfg = _read_config()
+    cfg["ports_skip_sfp"] = bool(skip)
+    _write_config(cfg)
+
+
 def load_putty_path() -> str:
     return str(_read_config().get("putty_path", "") or "")
 
@@ -1007,9 +1018,9 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                     server, err = payload
                     self._finish_audit_group_error(server, err)
                 elif kind == "ports_list":
-                    host, months, physical, unused, clearing = payload
+                    host, months, physical, unused, skipped, clearing = payload
                     self._finish_ports(host, months, physical, unused,
-                                       clearing)
+                                       skipped, clearing)
                 elif kind == "ports_error":
                     host, err = payload
                     self._finish_ports_error(host, err)

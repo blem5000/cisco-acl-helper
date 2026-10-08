@@ -69,15 +69,26 @@ class ParseInterfacesTest(unittest.TestCase):
 class FindUnusedTest(unittest.TestCase):
     def test_threshold_and_direction(self):
         ifs = ports.parse_show_interfaces(SAMPLE)
-        # 3 months: Gi1/0/1 alive via output, Te1/1/1 alive (5-6w < 3m);
-        # Gi1/0/2 (never) unused; Vlan/Po/Loopback never listed
+        # SFP excluded by default: 3 months -> only Gi1/0/2 (never);
+        # Gi1/0/1 alive via fresh output, Te alive (5-6w < 3m) anyway
         got = [e["name"] for e in ports.find_unused(ifs, 3)]
         self.assertEqual(got, ["GigabitEthernet1/0/2"])
-        # 1 month: Te pair joins (input 5w + output 6w both older);
-        # Gi1/0/1 stays used via fresh output 00:00:12
-        got1 = [e["name"] for e in ports.find_unused(ifs, 1)]
+        # without the SFP skip, 1 month also catches the Te pair
+        got1 = [e["name"]
+                for e in ports.find_unused(ifs, 1, skip_sfp=False)]
         self.assertEqual(got1, ["GigabitEthernet1/0/2",
                                 "TenGigabitEthernet1/1/1"])
+
+    def test_sfp_skip(self):
+        for yes in ("Te1/0/1", "TenGigabitEthernet1/1/1", "Twe1/0/13",
+                    "TwentyFiveGigE1/0/13", "Hu1/0/49", "Fo1/0/1"):
+            self.assertTrue(ports.is_sfp(yes), yes)
+        for no in ("Gi1/0/1", "Fa0/1", "FiveGigabitEthernet1/0/2",
+                   "Vlan1", "Port-channel1", ""):
+            self.assertFalse(ports.is_sfp(no), no)
+        ifs = ports.parse_show_interfaces(SAMPLE)
+        self.assertNotIn("TenGigabitEthernet1/1/1",
+                         [e["name"] for e in ports.find_unused(ifs, 120)])
 
     def test_output_keeps_port_used(self):
         ifs = [{"name": "Gi1/0/9", "status": "up", "protocol": "up",

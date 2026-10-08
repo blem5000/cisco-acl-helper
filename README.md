@@ -39,8 +39,9 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   z opisu rezerwacji DHCP (znacznik BCS w dowolnym miejscu opisu).
 - **Porty** — znajduje na urządzeniu porty fizyczne nieużywane od X miesięcy
   (brak ruchu w obie strony wg `Last input/output` z `show interfaces`,
-  miesiąc = 30 dni): ile ich jest i które to, ze statusem, ostatnim ruchem
-  i opisem. Próg miesięcy pamiętany między uruchomieniami.
+  miesiąc = 30 dni; porty SFP/uplink pomijane, do włączenia): ile ich jest
+  i które to, ze statusem, ostatnim ruchem i opisem. Próg miesięcy
+  pamiętany między uruchomieniami.
 - **Szukanie adresu** — namierzanie IP: `show ip arp` → MAC →
   `show mac address-table` → port → sąsiad `show cdp neighbors detail`.
   Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada
