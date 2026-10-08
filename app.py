@@ -146,7 +146,10 @@ def save_ports_scope(scope: str, group: str = "") -> None:
 
 def load_group_pattern() -> str:
     import groups as _g
-    return str(_read_config().get("group_pattern", _g.DEFAULT_PATTERN) or "")
+    v = str(_read_config().get("group_pattern", "") or "")
+    if not v or v in _g.LEGACY_PATTERNS:
+        return _g.DEFAULT_PATTERN
+    return v
 
 
 def save_group_pattern(pattern: str) -> None:

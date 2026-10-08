@@ -15,6 +15,11 @@ import re
 #: "LGEMA_GMES2.0_HB_B" -> "LGEMA_GMES2.0".
 DEFAULT_PATTERN = r"^([^._]+[._][^._]+(?:[._][^._]+)?)"
 
+#: Earlier defaults, replaced by DEFAULT_PATTERN on load (the dialog
+#: persists whatever was shown, so without this the old default would
+#: stick forever once saved).
+LEGACY_PATTERNS = (r"^([A-Za-z0-9]+_[A-Za-z0-9]+_[A-Za-z0-9]+)",)
+
 
 def suggest_group_regex(source: str, pattern: str) -> str:
     """Propose a group name, "" on no match. Raises re.error if bad."""
