@@ -44,10 +44,17 @@ _SFP = (
 
 
 def is_physical(name: str) -> bool:
-    """Physical ethernet port (excludes Vlan/Port-channel/Loopback/...)."""
+    """Switching ethernet port.
+
+    Excludes Vlan/Port-channel/Loopback/... and the out-of-band
+    management port: bare Fa0, or slot 0/0 (GigabitEthernet0/0).
+    Numbered member-0 switching ports (Fa0/1 on old platforms) stay.
+    """
     s = (name or "").strip().lower().replace(" ", "")
     m = re.match(r"^([a-z\-]+)", s)
-    return bool(m) and m.group(1) in _PHYSICAL
+    if not m or m.group(1) not in _PHYSICAL:
+        return False
+    return not re.match(r"^[a-z\-]+(?:0|0/0(?:/0)?)$", s)
 
 
 def is_sfp(name: str) -> bool:

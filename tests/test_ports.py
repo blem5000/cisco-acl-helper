@@ -62,8 +62,12 @@ class ParseInterfacesTest(unittest.TestCase):
                     "FiveGigabitEthernet1/0/2", "Fo1/0/1", "Hu1/0/49"):
             self.assertTrue(ports.is_physical(yes), yes)
         for no in ("Vlan57", "Port-channel1", "Po10", "Loopback0",
-                   "Tunnel0", "Null0", "StackPort1", ""):
+                   "Tunnel0", "Null0", "StackPort1", "",
+                   "FastEthernet0", "Fa0", "GigabitEthernet0/0",
+                   "Gi0/0", "TenGigabitEthernet0/0"):
             self.assertFalse(ports.is_physical(no), no)
+        # member-0 switching ports on old platforms stay physical
+        self.assertTrue(ports.is_physical("Fa0/1"))
 
 
 class FindUnusedTest(unittest.TestCase):
