@@ -69,6 +69,21 @@ class ParseInterfacesTest(unittest.TestCase):
         # member-0 switching ports on old platforms stay physical
         self.assertTrue(ports.is_physical("Fa0/1"))
 
+    def test_management_ports_all_platforms(self):
+        for mgmt in ("FastEthernet0", "Fa0", "GigabitEthernet0",
+                     "GigabitEthernet0/0", "Gi0/0", "TenGigabitEthernet0/0",
+                     "mgmt0", "MGMT0", "Management0/0", "Management0/1",
+                     "MgmtEth0/RP0/CPU0/0"):
+            self.assertTrue(ports.is_management(mgmt), mgmt)
+            # never listed, even if idle since forever
+            ifs = [{"name": mgmt, "status": "up", "protocol": "up",
+                   "description": "", "last_input": "never",
+                   "last_output": "never", "last_clearing": "never"}]
+            self.assertEqual(ports.find_unused(ifs, 120), [], mgmt)
+        # three-part 0/0/0 carries data on ISRs - stays listed
+        self.assertFalse(ports.is_management("GigabitEthernet0/0/0"))
+        self.assertTrue(ports.is_physical("GigabitEthernet0/0/0"))
+
 
 class FindUnusedTest(unittest.TestCase):
     def test_threshold_and_direction(self):

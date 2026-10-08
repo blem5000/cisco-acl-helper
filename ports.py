@@ -43,18 +43,35 @@ _SFP = (
 )
 
 
+def is_management(name: str) -> bool:
+    """Out-of-band management port (never a switching port).
+
+    Covers Fa0 (classic IOS), GigabitEthernet0/0 (IOS-XE),
+    mgmt0 (NX-OS), Management0/x (ASA), bare GigabitEthernet0 (ISR).
+    Three-part 0/0/0 is deliberately kept - on ISRs those carry data.
+    Numbered member-0 switching ports (Fa0/1 on old platforms) stay.
+    """
+    s = (name or "").strip().lower().replace(" ", "")
+    m = re.match(r"^([a-z\-]+)(.*)$", s)
+    if not m:
+        return False
+    alpha, rest = m.group(1), m.group(2)
+    if alpha == "management" or alpha.startswith("mgmt"):
+        return True
+    return rest in ("0", "0/0")
+
+
 def is_physical(name: str) -> bool:
     """Switching ethernet port.
 
-    Excludes Vlan/Port-channel/Loopback/... and the out-of-band
-    management port: bare Fa0, or slot 0/0 (GigabitEthernet0/0).
-    Numbered member-0 switching ports (Fa0/1 on old platforms) stay.
+    Excludes Vlan/Port-channel/Loopback/... and any out-of-band
+    management port (see is_management).
     """
     s = (name or "").strip().lower().replace(" ", "")
     m = re.match(r"^([a-z\-]+)", s)
     if not m or m.group(1) not in _PHYSICAL:
         return False
-    return not re.match(r"^[a-z\-]+(?:0|0/0(?:/0)?)$", s)
+    return not is_management(name)
 
 
 def is_sfp(name: str) -> bool:
