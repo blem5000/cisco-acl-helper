@@ -13,6 +13,7 @@ pip install -r requirements.txt
 # folder build (fast start, no unpacking)
 python -m PyInstaller --noconfirm --clean --onedir --noconsole `
   --name "CiscoACLHelper" `
+  --icon "assets\app.ico" `
   --collect-submodules paramiko `
   --collect-submodules cryptography `
   app.py
@@ -23,6 +24,7 @@ python -m PyInstaller --noconfirm --clean --onedir --noconsole `
 # Stdlib + tkinter only, so the onefile unpack cost is negligible.
 python -m PyInstaller --noconfirm --clean --onefile --noconsole `
   --name "CiscoACLHelperUpdater" `
+  --icon "assets\app.ico" `
   updater_app.py
 
 $UpdSrc = "dist\CiscoACLHelperUpdater.exe"
