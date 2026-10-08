@@ -25,6 +25,37 @@ class PortChannelTest(unittest.TestCase):
             self.assertFalse(track.is_portchannel(p), p)
 
 
+class PortNameTest(unittest.TestCase):
+    def test_twentyfive_gig_forms_match(self):
+        # MAC table "Twe1/0/13" vs CDP detail "TwentyFiveGigE1/0/13"
+        # vs summary "Twe 1/0/13" must all normalize identically
+        forms = [track.normalize_port(p) for p in
+                 ("Twe1/0/13", "TwentyFiveGigE1/0/13", "Twe 1/0/13",
+                  "twentyfivegigabitethernet1/0/13")]
+        self.assertTrue(all(f == forms[0] for f in forms), forms)
+
+    def test_twe_not_confused_with_twogig(self):
+        self.assertNotEqual(track.normalize_port("Twe1/0/13"),
+                            track.normalize_port("Tw1/0/1"))
+        self.assertEqual(track.normalize_port("Tw1/0/1"),
+                         "twogigabitethernet1/0/1")
+
+    def test_cdp_found_on_twe_port(self):
+        detail = ("--------------------------\n"
+                  "Device ID: MA1_2F_3_5_96105_O.lgema.local\n"
+                  "Entry address(es):\n"
+                  "  IP address: 10.207.96.5\n"
+                  "Platform: cisco WS-C2960X, Capabilities: Switch IGMP\n"
+                  "Interface: TwentyFiveGigE1/0/13, "
+                  "Port ID (outgoing port): GigabitEthernet1/0/49\n"
+                  "Holdtime : 142 sec\n")
+        nb = track.find_cdp_on_port(track.parse_cdp_detail(detail),
+                                    "Twe1/0/13")
+        self.assertIsNotNone(nb)
+        self.assertEqual(nb["device"],
+                         "MA1_2F_3_5_96105_O.lgema.local")
+
+
 class FindPartnerTest(unittest.TestCase):
     def test_by_host(self):
         devs = [{"host": "10.0.0.1", "partner": "10.0.0.2"},
