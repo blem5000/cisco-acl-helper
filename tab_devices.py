@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 import acl_parser
 import cisco_ssh
 import device_import
-from dialogs import DeviceDialog, ImportDialog
+from dialogs import DeviceDialog, GroupDialog, ImportDialog
 from i18n import STRINGS
 
 
@@ -214,6 +214,27 @@ class DevicesTabMixin:
         except Exception as e:
             self.msg_queue.put(("info", self.T("conn_fail").format(host=d["host"], err=e)))
 
+    def group_devices(self):
+        """Auto-assign groups from hostname/label via preview dialog."""
+        if not self._require_unlocked():
+            return
+        if not self.devices:
+            messagebox.showwarning("ACL", self.T("status_no_devices"))
+            return
+        dlg = GroupDialog(self, self.lang, self.devices)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        n = 0
+        for d in self.devices:
+            g = dlg.result.get(str(d.get("host", "") or "").strip())
+            if g:
+                d["group"] = g
+                n += 1
+        self.persist_store()
+        self.refresh_tree()
+        messagebox.showinfo("ACL", self.T("grp_applied").format(n=n))
+
     def import_devices(self):
         """Import devices from mRemoteNG confCons.xml or a generic XML file.
 
@@ -396,6 +417,8 @@ class DevicesTabMixin:
         self.btn_test.pack(side="left", padx=6)
         self.btn_import = ttk.Button(dbtns, text="", command=self.import_devices)
         self.btn_import.pack(side="left", padx=6)
+        self.btn_group = ttk.Button(dbtns, text="", command=self.group_devices)
+        self.btn_group.pack(side="left", padx=6)
 
     def _apply_devices_language(self):
         S = STRINGS[self.lang]
@@ -411,3 +434,4 @@ class DevicesTabMixin:
         self.btn_del.configure(text=S["del_btn"])
         self.btn_test.configure(text=S["test_btn"])
         self.btn_import.configure(text=S["import_btn"])
+        self.btn_group.configure(text=S["grp_btn"])

@@ -22,7 +22,9 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   Jeden login/hasło/enable z dialogu pokrywa cały import (uzupełnia braki,
    opcjonalnie nadpisuje wszystko), a IP już będące na liście są pomijane
    (nigdy nie duplikowane). Każde urządzenie ma grupę (szafa/lokalizacja)
-   do operacji na całej szafie naraz.
+   do operacji na całej szafie naraz; przycisk **Grupuj** przypisuje grupy
+   automatycznie z etykiety/nazwy hosta (separator + liczba członów,
+   z podglądem, bez nadpisywania ręcznych).
 - **Podsieci** — mapowanie `podsieć (CIDR) → ACL-IN / ACL-OUT` (osobne listy
   dla kierunków in/out).
 - **Generator ACL** — dla jednego komputera i wielu kamer generuje gotowy

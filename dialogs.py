@@ -1,4 +1,4 @@
-"""Modal dialogs (master password, device, import, subnet)."""
+"""Modal dialogs (master password, device, import, subnet, grouping)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import crypto_store
+import groups
 from i18n import STRINGS, VALID_LANGS
 
 
@@ -347,4 +348,111 @@ class SubnetDialog(tk.Toplevel):
             messagebox.showwarning("ACL", S["need_one_acl"])
             return
         self.result = {"subnet": subnet, "acl_in": acl_in, "acl_out": acl_out}
+        self.destroy()
+
+
+class GroupDialog(tk.Toplevel):
+    """Modal dialog: auto-assign device groups from hostname/label."""
+
+    def __init__(self, parent, lang: str, devices: list):
+        super().__init__(parent)
+        S = STRINGS[lang]
+        self._lang = lang
+        self._devices = [dict(d) for d in devices or []]
+        self.title(S["grp_title"])
+        self.resizable(False, False)
+        self.result: dict | None = None
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        ttk.Label(self, text=S["grp_src_label"]).grid(
+            row=0, column=0, sticky="w", padx=12, pady=(12, 2))
+        self.src_var = tk.StringVar(value="hostname")
+        src_fr = ttk.Frame(self)
+        src_fr.grid(row=1, column=0, sticky="w", padx=12)
+        ttk.Radiobutton(src_fr, text=S["grp_src_hostname"], value="hostname",
+                        variable=self.src_var,
+                        command=self._refresh).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(src_fr, text=S["grp_src_host"], value="host",
+                        variable=self.src_var,
+                        command=self._refresh).pack(side="left")
+
+        ttk.Label(self, text=S["grp_seps_label"]).grid(
+            row=2, column=0, sticky="w", padx=12, pady=(8, 2))
+        seps_fr = ttk.Frame(self)
+        seps_fr.grid(row=3, column=0, sticky="w", padx=12)
+        self.e_seps = ttk.Entry(seps_fr, width=8, font=("Consolas", 10))
+        self.e_seps.insert(0, "._-")
+        self.e_seps.pack(side="left")
+        self.e_seps.bind("<KeyRelease>", lambda _e: self._refresh())
+        ttk.Label(seps_fr, text=S["grp_parts_label"]).pack(
+            side="left", padx=(12, 4))
+        self.parts_var = tk.StringVar(value="2")
+        self.spin_parts = ttk.Spinbox(seps_fr, from_=1, to=5, width=4,
+                                      textvariable=self.parts_var,
+                                      command=self._refresh)
+        self.spin_parts.pack(side="left")
+        self.spin_parts.bind("<KeyRelease>", lambda _e: self._refresh())
+
+        self.scope_var = tk.StringVar(value="empty")
+        ttk.Radiobutton(self, text=S["grp_only_empty"], value="empty",
+                        variable=self.scope_var,
+                        command=self._refresh).grid(
+                            row=4, column=0, sticky="w", padx=12, pady=(8, 0))
+        ttk.Radiobutton(self, text=S["grp_all"], value="all",
+                        variable=self.scope_var,
+                        command=self._refresh).grid(
+                            row=5, column=0, sticky="w", padx=12)
+
+        self.lbl_count = ttk.Label(self, text="", foreground="blue")
+        self.lbl_count.grid(row=6, column=0, sticky="w", padx=12, pady=(8, 0))
+        self.txt = tk.Text(self, width=64, height=12, font=("Consolas", 9),
+                           state="disabled")
+        self.txt.grid(row=7, column=0, padx=12, pady=(2, 0))
+
+        fr = ttk.Frame(self)
+        fr.grid(row=8, column=0, pady=12)
+        ttk.Button(fr, text=S["ok_btn"], command=self._on_ok).pack(
+            side="left", padx=6)
+        ttk.Button(fr, text=S["cancel_btn"], command=self.destroy).pack(
+            side="left", padx=6)
+        self.transient(parent)
+        self._refresh()
+
+    def _current(self) -> dict[str, str]:
+        try:
+            parts = int(self.parts_var.get().strip() or "2")
+        except ValueError:
+            parts = 2
+        return groups.auto_assign(
+            self._devices, self.src_var.get(), self.e_seps.get(), parts,
+            self.scope_var.get() == "empty")
+
+    def _refresh(self):
+        S = STRINGS[self._lang]
+        proposed = self._current()
+        self._proposed = proposed
+        self.lbl_count.configure(
+            text=S["grp_preview_count"].format(n=len(proposed)))
+        lines = []
+        for d in self._devices:
+            host = str(d.get("host", "") or "").strip()
+            if not host:
+                continue
+            label = str(d.get("hostname", "") or "").strip()
+            cur = (d.get("group") or "").strip() or "-"
+            new = proposed.get(host)
+            mark = f"-> {new}" if new else "(...)"
+            lines.append(f"{host:22} {label:28} {cur:18} {mark}")
+        self.txt.configure(state="normal")
+        self.txt.delete("1.0", tk.END)
+        self.txt.insert("1.0", "\n".join(lines))
+        self.txt.configure(state="disabled")
+
+    def _on_ok(self):
+        S = STRINGS[self._lang]
+        if not self._current():
+            messagebox.showwarning("ACL", S["grp_none"])
+            return
+        self.result = self._current()
         self.destroy()
