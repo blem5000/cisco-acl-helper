@@ -16,6 +16,8 @@ class SuggestRegexTest(unittest.TestCase):
         self.assertEqual(groups.suggest_group_regex(
             "MA1_2F_3_5_96105_O.lgema.local", pat), "MA1_2F_3")
         self.assertEqual(groups.suggest_group_regex(
+            "LGEMA_GMES2.0_HB_B", pat), "LGEMA_GMES2.0")
+        self.assertEqual(groups.suggest_group_regex(
             "LGEMA_CORE_P", pat), "LGEMA_CORE_P")
 
     def test_group1_else_whole_match(self):

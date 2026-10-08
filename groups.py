@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import re
 
-#: Default: first three _-separated parts (building_floor_section).
-DEFAULT_PATTERN = r"^([A-Za-z0-9]+_[A-Za-z0-9]+_[A-Za-z0-9]+)"
+#: Default: 2-3 leading segments with original separators, e.g.
+#: "MA1_2F_3_5_96105_O.lgema.local" -> "MA1_2F_3",
+#: "LGEMA_GMES2.0_HB_B" -> "LGEMA_GMES2.0".
+DEFAULT_PATTERN = r"^([^._]+[._][^._]+(?:[._][^._]+)?)"
 
 
 def suggest_group_regex(source: str, pattern: str) -> str:
