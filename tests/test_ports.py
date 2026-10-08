@@ -1,5 +1,6 @@
 """Tests for unused-port finder (show interfaces parsing). Headless-safe."""
 
+import ast
 import os
 import sys
 import unittest
@@ -159,6 +160,30 @@ class RackHelpersTest(unittest.TestCase):
                                                          "Serwerownia")]
         self.assertEqual(got, ["10.0.0.2", "10.0.0.1"])
         self.assertEqual(tab_ports.rack_devices(self.DEVS, "Brak"), [])
+
+
+class TabStructureTest(unittest.TestCase):
+    def test_apply_only_uses_widgets_built_at_startup(self):
+        # regression: the buttons block once slipped into a method that
+        # runs after unlock, while _apply_* runs at startup -> AttributeError
+        src = open(os.path.join(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))),
+            "tab_ports.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        methods = {n.name: n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)}
+        built = set()
+        for n in ast.walk(methods["_build_ports_tab"]):
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                    and n.value.id == "self" and isinstance(n.ctx, ast.Store):
+                built.add(n.attr)
+        used = set()
+        for n in ast.walk(methods["_apply_ports_language"]):
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                    and n.value.id == "self" and isinstance(n.ctx, ast.Load):
+                used.add(n.attr)
+        # self.lang is set by App, not the tab
+        self.assertEqual(used - built, {"lang"})
 
 
 if __name__ == "__main__":

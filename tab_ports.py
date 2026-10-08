@@ -294,27 +294,6 @@ class PortsTabMixin:
                 self.ports_scope_var.get(), self.ports_group_var.get()))
         self._sync_ports_scope()
 
-    def _sync_ports_scope(self):
-        """Enable only the combo matching the scope (device vs rack)."""
-        try:
-            rack = self.ports_scope_var.get() == "rack"
-        except (tk.TclError, AttributeError):
-            rack = False
-        try:
-            self.combo_ports_dev.configure(state="disabled" if rack
-                                           else "readonly")
-            self.combo_ports_group.configure(state="readonly" if rack
-                                             else "disabled")
-        except tk.TclError:
-            pass
-
-    def _refresh_ports_groups(self):
-        """Rack combo values from device groups; keep selection if valid."""
-        names = rack_names(self.devices)
-        self.combo_ports_group.configure(values=names)
-        if self.ports_group_var.get() not in names:
-            self.ports_group_var.set(names[0] if names else "")
-
         pbtns = ttk.Frame(self.tab_ports)
         pbtns.pack(fill="x", padx=10, pady=(0, 8))
         self.btn_ports_copy = ttk.Button(pbtns, text="",
@@ -346,6 +325,27 @@ class PortsTabMixin:
         pxs.grid(row=1, column=0, sticky="ew")
         res_fr.grid_rowconfigure(0, weight=1)
         res_fr.grid_columnconfigure(0, weight=1)
+
+    def _sync_ports_scope(self):
+        """Enable only the combo matching the scope (device vs rack)."""
+        try:
+            rack = self.ports_scope_var.get() == "rack"
+        except (tk.TclError, AttributeError):
+            rack = False
+        try:
+            self.combo_ports_dev.configure(state="disabled" if rack
+                                           else "readonly")
+            self.combo_ports_group.configure(state="readonly" if rack
+                                             else "disabled")
+        except tk.TclError:
+            pass
+
+    def _refresh_ports_groups(self):
+        """Rack combo values from device groups; keep selection if valid."""
+        names = rack_names(self.devices)
+        self.combo_ports_group.configure(values=names)
+        if self.ports_group_var.get() not in names:
+            self.ports_group_var.set(names[0] if names else "")
 
     def _apply_ports_language(self):
         S = STRINGS[self.lang]
