@@ -66,7 +66,8 @@ class PortsTabMixin:
             res = cisco_ssh.run_commands(
                 dev["host"], dev["username"], dev.get("password", ""),
                 dev.get("enable") or None, int(dev.get("port", 22)),
-                commands=["show interfaces", "show inventory"],
+                commands=["show interfaces", "show inventory",
+                          "show interfaces status"],
                 debug_log=self._ssh_debug_log())
             out = res.get("show interfaces", "")
             if not out.strip():
@@ -74,6 +75,10 @@ class PortsTabMixin:
             ifs = ports_mod.parse_show_interfaces(out)
             stocked = ports_mod.parse_inventory_transceivers(
                 res.get("show inventory", ""))
+            for name, typ in ports_mod.parse_status_types(
+                    res.get("show interfaces status", "")).items():
+                if ports_mod.is_fiber_type(typ):
+                    stocked.add(name)
             physical = [e for e in ifs if ports_mod.is_physical(e.get("name", ""))]
             skipped = sum(1 for e in physical
                           if skip_sfp and (ports_mod.is_sfp(e.get("name", ""))

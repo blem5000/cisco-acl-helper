@@ -120,6 +120,30 @@ class FindUnusedTest(unittest.TestCase):
         ifs = ports.parse_show_interfaces(SAMPLE)
         self.assertEqual(ports.common_clearing(ifs), "never")
 
+    def test_status_types_real_world(self):
+        status = ("Port      Name               Status       Vlan       Duplex  Speed Type\n"
+                  "Gi1/0/48  ==AP122==          connected    trunk      a-full a-1000 10/100/1000BaseTX\n"
+                  "Gi1/0/49                     connected    trunk      a-full a-1000 1000BaseSX SFP\n"
+                  "Gi1/0/50                     notconnect   1            auto   auto Not Present\n"
+                  "Gi1/0/51                     connected    trunk      a-full a-1000 1000BaseSX SFP\n")
+        types = ports.parse_status_types(status)
+        self.assertEqual(types["gigabitethernet1/0/48"], "10/100/1000BaseTX")
+        self.assertEqual(types["gigabitethernet1/0/50"], "Not Present")
+        self.assertFalse(ports.is_fiber_type(types["gigabitethernet1/0/48"]))
+        for p in ("gigabitethernet1/0/49", "gigabitethernet1/0/50",
+                  "gigabitethernet1/0/51"):
+            self.assertTrue(ports.is_fiber_type(types[p]), p)
+        # empty cage + populated SFP both skipped via the status set
+        ifs = [{"name": "GigabitEthernet1/0/48", "status": "down",
+               "protocol": "down", "description": "", "last_input": "never",
+               "last_output": "never", "last_clearing": "never"},
+               {"name": "GigabitEthernet1/0/50", "status": "down",
+               "protocol": "down", "description": "", "last_input": "never",
+               "last_output": "never", "last_clearing": "never"}]
+        stocked = {n for n, t in types.items() if ports.is_fiber_type(t)}
+        got = [e["name"] for e in ports.find_unused(ifs, 3, True, stocked)]
+        self.assertEqual(got, ["GigabitEthernet1/0/48"])
+
 
 if __name__ == "__main__":
     unittest.main()

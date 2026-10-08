@@ -171,6 +171,44 @@ def canon_name(name: str) -> str:
         return (name or "").strip().lower().replace(" ", "")
 
 
+_DUPLEX = {"a-full", "full", "a-half", "half", "auto"}
+
+#: Media types meaning "SFP/fiber or empty cage" (skip with SFP ports).
+_FIBER_TYPE = re.compile(
+    r"sfp|not present|no xcvr|1000base(?!tx)|10gbase|25gbase|40gbase|100gbase",
+    re.IGNORECASE)
+
+
+def parse_status_types(output: str) -> dict[str, str]:
+    """`show interfaces status` -> {canon_name: media Type}.
+
+    Takes the leftmost Duplex token (descriptions containing "auto"
+    err to the safe side: the port is kept, never wrongly skipped),
+    Speed is the next token, Type is everything after it - so
+    descriptions with spaces and multi-word types ("1000BaseSX SFP",
+    "Not Present") cannot shift the columns. Lines without Duplex
+    (headers) are skipped.
+    """
+    types: dict[str, str] = {}
+    for raw in (output or "").splitlines():
+        parts = raw.split()
+        if len(parts) < 5 or parts[0].lower() == "port":
+            continue
+        dup = next((k for k in range(1, len(parts))
+                    if parts[k].lower() in _DUPLEX and k + 1 < len(parts)),
+                   None)
+        if dup is None:
+            continue
+        typ = " ".join(parts[dup + 2:])
+        types[canon_name(parts[0])] = typ
+    return types
+
+
+def is_fiber_type(typ: str) -> bool:
+    """Media Type of an SFP/fiber port or an empty cage."""
+    return bool(typ) and bool(_FIBER_TYPE.search(typ))
+
+
 def parse_inventory_transceivers(output: str) -> set[str]:
     """Physical interface names holding a transceiver (`show inventory`).
 
