@@ -198,8 +198,10 @@ def canon_name(name: str) -> str:
 _DUPLEX = {"a-full", "full", "a-half", "half", "auto"}
 
 #: Media types meaning "SFP/fiber or empty cage" (skip with SFP ports).
+#: Empty cages report "Not Present" (2960X) or "unknown" (9200L).
 _FIBER_TYPE = re.compile(
-    r"sfp|not present|no xcvr|1000base(?!tx)|10gbase|25gbase|40gbase|100gbase",
+    r"sfp|not present|unknown|no xcvr|1000base(?!tx)|10gbase|25gbase|"
+    r"40gbase|100gbase",
     re.IGNORECASE)
 
 

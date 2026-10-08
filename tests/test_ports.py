@@ -163,6 +163,17 @@ class FindUnusedTest(unittest.TestCase):
         got = [e["name"] for e in ports.find_unused(ifs, 3, True, stocked)]
         self.assertEqual(got, ["GigabitEthernet1/0/48"])
 
+    def test_status_types_9200l_empty_cages(self):
+        # 9200L uplink cages: populated GLC-TE vs empty ("unknown")
+        status = ("Port      Name               Status       Vlan       Duplex  Speed Type\n"
+                  "Gi1/0/33                     connected    56         a-full a-1000 10/100/1000BaseTX\n"
+                  "Gi1/1/1                      disabled     trunk        auto   auto unknown\n"
+                  "Gi1/1/4                      connected    trunk      a-full a-1000 10/100/1000BaseTX SFP\n")
+        types = ports.parse_status_types(status)
+        self.assertFalse(ports.is_fiber_type(types["gigabitethernet1/0/33"]))
+        self.assertTrue(ports.is_fiber_type(types["gigabitethernet1/1/1"]))
+        self.assertTrue(ports.is_fiber_type(types["gigabitethernet1/1/4"]))
+
 
 if __name__ == "__main__":
     unittest.main()
