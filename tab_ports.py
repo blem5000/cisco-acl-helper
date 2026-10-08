@@ -66,16 +66,21 @@ class PortsTabMixin:
             res = cisco_ssh.run_commands(
                 dev["host"], dev["username"], dev.get("password", ""),
                 dev.get("enable") or None, int(dev.get("port", 22)),
-                commands=["show interfaces"],
+                commands=["show interfaces", "show inventory"],
                 debug_log=self._ssh_debug_log())
             out = res.get("show interfaces", "")
             if not out.strip():
                 raise RuntimeError("Empty response - check privileges.")
             ifs = ports_mod.parse_show_interfaces(out)
+            stocked = ports_mod.parse_inventory_transceivers(
+                res.get("show inventory", ""))
             physical = [e for e in ifs if ports_mod.is_physical(e.get("name", ""))]
             skipped = sum(1 for e in physical
-                          if skip_sfp and ports_mod.is_sfp(e.get("name", "")))
-            unused = ports_mod.find_unused(physical, months, skip_sfp)
+                          if skip_sfp and (ports_mod.is_sfp(e.get("name", ""))
+                                           or ports_mod.canon_name(
+                                               e.get("name", "")) in stocked))
+            unused = ports_mod.find_unused(physical, months, skip_sfp,
+                                           stocked)
             self.msg_queue.put(("ports_list", (dev["host"], months, physical,
                                               unused, skipped,
                                               ports_mod.common_clearing(ifs))))

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+import track
+
 #: One "month" for the threshold (documented in the UI).
 MONTH_DAYS = 30
 
@@ -132,19 +134,25 @@ def parse_show_interfaces(output: str) -> list[dict]:
 
 
 def find_unused(interfaces: list[dict], months: float,
-                skip_sfp: bool = True) -> list[dict]:
+                skip_sfp: bool = True,
+                sfp_ports: set[str] | None = None) -> list[dict]:
     """Physical ports with no input AND no output within `months`.
 
     "never" (None age) always counts as older than the threshold.
-    SFP/uplink ports are skipped by default. Keeps device order.
+    SFP/uplink ports are skipped by default: Te/Twe/Hu/Fo families by
+    name, plus any port with an inserted transceiver (from
+    `show inventory` - covers SFP cages named GigabitEthernet, e.g.
+    Gi1/0/50 on 2960), matched name-form agnostically. Empty SFP cages
+    cannot be detected and are still listed. Keeps device order.
     """
     threshold = months * MONTH_DAYS * 86400
+    stocked = {canon_name(p) for p in sfp_ports or set()}
     out: list[dict] = []
     for e in interfaces or []:
         name = e.get("name", "")
         if not is_physical(name):
             continue
-        if skip_sfp and is_sfp(name):
+        if skip_sfp and (is_sfp(name) or canon_name(name) in stocked):
             continue
         age_in = parse_age(e.get("last_input", ""))
         age_out = parse_age(e.get("last_output", ""))
@@ -153,6 +161,28 @@ def find_unused(interfaces: list[dict], months: float,
         if not used:
             out.append(e)
     return out
+
+
+def canon_name(name: str) -> str:
+    """Interface name for cross-command matching (Gi1/0/50 == full form)."""
+    try:
+        return track.normalize_port(name or "")
+    except Exception:
+        return (name or "").strip().lower().replace(" ", "")
+
+
+def parse_inventory_transceivers(output: str) -> set[str]:
+    """Physical interface names holding a transceiver (`show inventory`).
+
+    Only NAME fields that look like a physical port are returned
+    (switch/power/fan entries ignored).
+    """
+    found: set[str] = set()
+    for m in re.finditer(r'NAME:\s*"([^"]+)"', output or ""):
+        name = m.group(1).strip()
+        if is_physical(name):
+            found.add(name)
+    return found
 
 
 def common_clearing(interfaces: list[dict]) -> str:

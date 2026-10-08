@@ -90,6 +90,26 @@ class FindUnusedTest(unittest.TestCase):
         self.assertNotIn("TenGigabitEthernet1/1/1",
                          [e["name"] for e in ports.find_unused(ifs, 120)])
 
+    def test_stocked_sfp_cages_skipped(self):
+        inv = ('NAME: "Switch 1", DESCR: "WS-C2960S-48"\n'
+               'NAME: "GigabitEthernet1/0/50", DESCR: "1000BASE-SX SFP"\n'
+               'NAME: "GigabitEthernet1/0/52", DESCR: "1000BASE-LX SFP"\n'
+               'NAME: "Power Supply 0", DESCR: "Power Supply"\n')
+        stocked = ports.parse_inventory_transceivers(inv)
+        self.assertEqual(stocked,
+                         {"GigabitEthernet1/0/50", "GigabitEthernet1/0/52"})
+        ifs = [{"name": "GigabitEthernet1/0/50", "status": "down",
+               "protocol": "down", "description": "", "last_input": "never",
+               "last_output": "never", "last_clearing": "never"},
+               {"name": "GigabitEthernet1/0/20", "status": "down",
+               "protocol": "down", "description": "", "last_input": "never",
+               "last_output": "never", "last_clearing": "never"}]
+        got = [e["name"] for e in ports.find_unused(ifs, 3, True, stocked)]
+        self.assertEqual(got, ["GigabitEthernet1/0/20"])
+        got_all = [e["name"] for e in ports.find_unused(ifs, 3, False)]
+        self.assertEqual(got_all, ["GigabitEthernet1/0/50",
+                                   "GigabitEthernet1/0/20"])
+
     def test_output_keeps_port_used(self):
         ifs = [{"name": "Gi1/0/9", "status": "up", "protocol": "up",
                "description": "", "last_input": "never",
