@@ -88,6 +88,10 @@ class RemoveTabMixin:
 
     def _on_remove_dev_change(self):
         """Selection changed: anything fetched for the old set is stale."""
+        # The 'selected: N' hint lives only here - clicking the list does not
+        # repopulate it, so without this the label kept saying 'nothing
+        # selected' while two devices were highlighted.
+        self._refresh_remove_hint()
         if self._remove_state_is_current():
             return
         if self._remove_fetched or self._remove_blocks:
