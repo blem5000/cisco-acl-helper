@@ -76,13 +76,15 @@ class _Listbox:
 
 
 def _stub(devices, selected=()):
+    from tab_gen import GeneratorTabMixin
     from tab_remove import RemoveTabMixin
 
-    class Host(RemoveTabMixin):
+    class Host(RemoveTabMixin, GeneratorTabMixin):
         pass
 
     s = Host()
     s.devices = [dict(d) for d in devices]
+    s.only_l3_var = _Var(False)
     s.dev_label = lambda d: (
         f"{d.get('hostname')} {d.get('host')}".strip()
         if d.get("hostname") else d.get("host", ""))

@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import track
 from app import App
 from i18n import STRINGS
+from tab_gen import GeneratorTabMixin
 
 
 class PortChannelTest(unittest.TestCase):
@@ -126,10 +127,18 @@ class LinkPartnerTest(unittest.TestCase):
 
 
 class TrackVisibleTest(unittest.TestCase):
+    class _Stub(GeneratorTabMixin):
+        pass
+
     def _stub(self, devices, show_all):
-        return types.SimpleNamespace(
-            devices=[dict(d) for d in devices],
-            track_all_var=types.SimpleNamespace(get=lambda: show_all))
+        # Real mixin instance: _track_visible_devices delegates to
+        # _visible_devices, which must resolve through the class.
+        s = self._Stub()
+        s.devices = [dict(d) for d in devices]
+        s.track_all_var = types.SimpleNamespace(get=lambda: show_all)
+        s.only_l3_var = types.SimpleNamespace(get=lambda: False)
+        s.dev_label = lambda d: d.get("host", "")
+        return s
 
     def _hosts(self, stub):
         return [d["host"] for d in App._track_visible_devices(stub)]
