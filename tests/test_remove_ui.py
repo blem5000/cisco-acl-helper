@@ -66,7 +66,7 @@ class RemoveTabBuildTest(unittest.TestCase):
                 self.assertTrue(h.lbl_remove_prop.cget("text"))
 
             # tab registered in the notebook with a non-empty title
-            self.assertIn(h.tab_remove, h.nb.tabs())
+            self.assertIn(str(h.tab_remove), h.nb.tabs())
             self.assertTrue(h.nb.tab(h.tab_remove, "text"))
         finally:
             try:
