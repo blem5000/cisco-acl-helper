@@ -255,6 +255,7 @@ class RemoveTabMixin:
             messagebox.showwarning("ACL", self.T("remove_need_acl"))
             return
 
+        whole_block = bool(self.remove_block_var.get())
         server = self.dhcp_var.get().strip()
         if self.remove_owner_var.get() and server:
             self._remove_previewing = True
@@ -266,21 +267,26 @@ class RemoveTabMixin:
                 target=self._remove_owner_worker,
                 args=(server, ip, only, {h: dict(v["acls"])
                                          for h, v in self._remove_fetched.items()},
-                      {h: v["label"] for h, v in self._remove_fetched.items()}),
+                      {h: v["label"] for h, v in self._remove_fetched.items()},
+                      whole_block),
                 daemon=True).start()
             return
         # no DHCP server: brackets are still detected structurally, the
         # summary just cannot name the person.
-        self._render_remove_result(self._build_result(ip, only), ip)
+        self._render_remove_result(
+            self._build_result(ip, only, whole_block=whole_block), ip)
 
-    def _build_result(self, ip: str, only: str, owner_of=None) -> dict:
+    def _build_result(self, ip: str, only: str, owner_of=None,
+                      whole_block: bool = False) -> dict:
         devices = [(host, info["label"], info["acls"])
                    for host, info in self._remove_fetched.items()]
         return acl_parser.build_removal_blocks(
-            devices, ip, only=only, owner_of=owner_of)
+            devices, ip, only=only, owner_of=owner_of,
+            drop_whole_block=whole_block)
 
     def _remove_owner_worker(self, server: str, ip: str, only: str,
-                             acls: dict, labels: dict):
+                             acls: dict, labels: dict,
+                             whole_block: bool = False):
         try:
             now = time.time()
             hit = self._dhcp_cache.get(server)
@@ -303,7 +309,8 @@ class RemoveTabMixin:
             devices = [(host, labels.get(host, host), entries)
                        for host, entries in acls.items()]
             res = acl_parser.build_removal_blocks(
-                devices, ip, only=only, owner_of=owner_of)
+                devices, ip, only=only, owner_of=owner_of,
+                drop_whole_block=whole_block)
             self.msg_queue.put(("remove_preview", (ip, res)))
         except Exception as e:
             self.msg_queue.put(("remove_preview_error", (server, str(e))))
@@ -377,6 +384,14 @@ class RemoveTabMixin:
 
         notes: list[str] = list(res.get("covers") or [])
         notes.extend(res.get("unsequenced") or [])
+        # The person's bracket was kept because they still have entries for
+        # other machines. Say so - silently keeping it looked like the app
+        # simply failed to remove remarks.
+        kept = res.get("kept_brackets")
+        if isinstance(kept, str):
+            kept = [kept] if kept else []
+        for item in kept or []:
+            notes.append(self.T("remove_bracket_kept").format(where=item))
         if res.get("skipped"):
             notes.append(self.T("remove_skipped").format(
                 devices=", ".join(res["skipped"])))
@@ -511,6 +526,13 @@ class RemoveTabMixin:
             right, text="", variable=self.remove_owner_var)
         self.chk_remove_owner.grid(row=2, column=1, sticky="w",
                                    padx=(16, 0), pady=(4, 0))
+        # Removes the person's whole remark block, including entries for
+        # their other computers - for someone who left for good.
+        self.remove_block_var = tk.BooleanVar(value=False)
+        self.chk_remove_block = ttk.Checkbutton(
+            right, text="", variable=self.remove_block_var)
+        self.chk_remove_block.grid(row=3, column=1, sticky="w",
+                                   padx=(16, 0), pady=(2, 0))
 
         # --- actions ---
         rb = ttk.Frame(self.tab_remove)
@@ -592,6 +614,7 @@ class RemoveTabMixin:
         self.chk_remove_all.configure(text=S["remove_all_label"])
         self.lbl_remove_ip.configure(text=S["remove_ip_label"])
         self.chk_remove_owner.configure(text=S["remove_owner_label"])
+        self.chk_remove_block.configure(text=S["remove_block_label"])
         self.btn_remove_preview.configure(text=S["remove_preview_btn"])
         self.btn_remove_copy.configure(text=S["remove_copy_all"])
         self.btn_remove_clear.configure(text=S["clear_btn"])

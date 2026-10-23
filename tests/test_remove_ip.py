@@ -233,5 +233,135 @@ class RemovalBlocksTest(unittest.TestCase):
         self.assertEqual(out["blocks"][0]["label"], "10.0.0.1")
 
 
+class RemarkBracketTest(unittest.TestCase):
+    """The person's remark bracket must actually be removed.
+
+    Reported: a bracket `remark X / permit ... / remark X (koniec)` only
+    produced `no 980` - the two remarks were silently left behind.
+    """
+
+    OWNER = "Michal Zasina"
+    BRACKET = [
+        "960 remark Michal Zasina",
+        "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+        "1000 remark Michal Zasina (koniec)",
+    ]
+
+    def test_exact_reported_case(self):
+        res = acl_parser.remove_ip_entries(
+            self.BRACKET, "172.26.56.119", owner=self.OWNER)
+        self.assertEqual(res["deletes"], [960, 980, 1000])
+        self.assertEqual(res["removed_remarks"], 2)
+        self.assertEqual(res["kept_bracket"], "")
+
+    def test_bracket_removed_without_any_owner_hint(self):
+        # the bracket itself is enough - no DHCP lookup needed
+        res = acl_parser.remove_ip_entries(self.BRACKET, "172.26.56.119")
+        self.assertIn(960, res["deletes"])
+        self.assertIn(1000, res["deletes"])
+
+    def test_unclosed_bracket_removes_opening_remark(self):
+        entries = ["960 remark Michal Zasina",
+                   "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119"]
+        res = acl_parser.remove_ip_entries(
+            entries, "172.26.56.119", owner=self.OWNER)
+        self.assertEqual(res["deletes"], [960, 980])
+
+    def test_unclosed_bracket_does_not_swallow_next_person(self):
+        entries = [
+            "960 remark Michal Zasina",
+            "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+            "990 remark Jan Kowalski",
+            "1000 permit ip host 10.9.9.9 host 172.26.56.130",
+        ]
+        res = acl_parser.remove_ip_entries(
+            entries, "172.26.56.119", owner=self.OWNER)
+        # the other person's remark and entry must survive untouched
+        self.assertNotIn(990, res["deletes"])
+        self.assertNotIn(1000, res["deletes"])
+        self.assertIn("1000 permit ip host 10.9.9.9 host 172.26.56.130",
+                      res["keep"])
+
+    def test_kept_bracket_when_other_computers_remain(self):
+        entries = [
+            "960 remark Michal Zasina",
+            "970 permit ip host 10.9.9.9 host 172.26.56.130",
+            "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+            "1000 remark Michal Zasina (koniec)",
+        ]
+        res = acl_parser.remove_ip_entries(
+            entries, "172.26.56.119", owner=self.OWNER)
+        self.assertEqual(res["deletes"], [980])
+        self.assertEqual(res["kept_bracket"], self.OWNER)
+
+    def test_drop_whole_block_removes_everything(self):
+        entries = [
+            "960 remark Michal Zasina",
+            "970 permit ip host 10.9.9.9 host 172.26.56.130",
+            "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+            "1000 remark Michal Zasina (koniec)",
+        ]
+        res = acl_parser.remove_ip_entries(
+            entries, "172.26.56.119", owner=self.OWNER,
+            drop_whole_block=True)
+        self.assertEqual(res["deletes"], [960, 970, 980, 1000])
+        self.assertEqual(res["kept_bracket"], "")
+
+    def test_foreign_bracket_inside_is_never_deleted(self):
+        entries = [
+            "960 remark Michal Zasina",
+            "970 remark Jan Kowalski",
+            "975 permit ip host 10.9.9.9 host 172.26.56.119",
+            "990 remark Jan Kowalski (koniec)",
+            "1000 remark Michal Zasina (koniec)",
+        ]
+        res = acl_parser.remove_ip_entries(entries, "172.26.56.119")
+        self.assertNotIn(970, res["deletes"])
+        self.assertNotIn(990, res["deletes"])
+
+    def test_descriptive_note_is_not_a_person_bracket(self):
+        entries = [
+            "10 remark OUT: 10.20.30.40 -> cameras",
+            "20 permit ip host 10.20.30.40 host 10.20.30.201",
+            "30 remark Goscie",
+        ]
+        res = acl_parser.remove_ip_entries(entries, "10.20.30.40")
+        self.assertEqual(res["deletes"], [20])
+        self.assertIn("10 remark OUT: 10.20.30.40 -> cameras", res["keep"])
+
+    def test_remarks_without_sequence_are_reported(self):
+        entries = [
+            "remark Michal Zasina",
+            "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+            "remark Michal Zasina (koniec)",
+        ]
+        res = acl_parser.remove_ip_entries(
+            entries, "172.26.56.119", owner=self.OWNER)
+        self.assertEqual(res["deletes"], [980])
+        self.assertEqual(len(res["unsequenced"]), 2)
+
+    def test_kept_bracket_reaches_the_ui_result(self):
+        entries = [
+            "960 remark Michal Zasina",
+            "970 permit ip host 10.9.9.9 host 172.26.56.130",
+            "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+            "1000 remark Michal Zasina (koniec)",
+        ]
+        out = acl_parser.build_removal_blocks(
+            [("h1", "sw-a", {"ACL-BCS-IN": entries})],
+            "172.26.56.119", owner=self.OWNER)
+        self.assertEqual(len(out["kept_brackets"]), 1)
+        self.assertIn(self.OWNER, out["kept_brackets"][0])
+
+    def test_owner_line_matches_clean_owner(self):
+        # clean_owner collapses whitespace; the bracket must still pair
+        entries = ["960 remark Michal   Zasina",
+                   "980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+                   "1000 remark Michal   Zasina (koniec)"]
+        res = acl_parser.remove_ip_entries(entries, "172.26.56.119")
+        self.assertIn(960, res["deletes"])
+        self.assertIn(1000, res["deletes"])
+
+
 if __name__ == "__main__":
     unittest.main()

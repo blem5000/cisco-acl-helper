@@ -85,6 +85,7 @@ def _host(selected=(0,), ip="10.0.0.50"):
     h.remove_acl_var = _Var("CAM-IN")
     h.remove_all_var = _Var(False)
     h.remove_owner_var = _Var(False)
+    h.remove_block_var = _Var(False)
     h.dhcp_var = _Var("")
     h.ent_remove_ip = type("E", (), {"get": staticmethod(lambda: ip)})()
     h.combo_remove_acl = _Widget()

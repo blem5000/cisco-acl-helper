@@ -1142,6 +1142,26 @@ def build_grouped_acl_script(pc_ip: str,
 OWNER_CLOSE_MARK = "(koniec)"
 
 
+def _looks_like_person(text: str) -> bool:
+    """Heuristic: does this remark read as a person name, not a note?
+
+    Generator notes look like `OUT: 10.0.0.5 -> cameras` or mention an
+    address; those must never be treated as somebody's opening bracket,
+    or a person's block would be guessed wrong and unrelated lines
+    deleted. A name is short, has letters, and no colon, arrow or digits.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 60:
+        return False
+    if ":" in t or "->" in t or "=>" in t:
+        return False
+    if any(ch.isdigit() for ch in t):
+        return False
+    if not any(ch.isalpha() for ch in t):
+        return False
+    return True
+
+
 def _ep_match(ep: dict, ip_int: int) -> str | None:
     """Classify an ACE endpoint against one address.
 
@@ -1173,16 +1193,17 @@ def _owner_brackets(items: list[dict]) -> list[dict]:
     """Pair `remark <person>` with `remark <person> (koniec)`.
 
     Only well-formed pairs become brackets, and each opening remark is
-    consumed once. Descriptive remarks (generator notes such as
-    `OUT: 10.0.0.5 -> cameras`) never pair with anything, so they are
-    never mistaken for a person and never removed.
+    consumed once. An opening without its `(koniec)` is returned with
+    close_idx=None, so a truncated or hand-edited bracket is still known
+    (its remark can be dropped when the person is identified by DHCP).
 
-    Returns [{"owner", "open_idx", "close_idx", "idxs"}], idxs being every
-    item index inside the bracket, remarks included.
+    Returns [{"owner", "open_idx", "close_idx" or None, "idxs"}].
+    "idxs" is every item index inside the bracket, remarks included.
     """
     opens: dict[str, list[int]] = {}
     blocks: list[dict] = []
     seen: set[int] = set()
+    matched_open: set[int] = set()
     for pos, it in enumerate(items):
         if it["kind"] != "remark":
             continue
@@ -1200,6 +1221,7 @@ def _owner_brackets(items: list[dict]) -> list[dict]:
             open_idx = stack.pop()
             seen.add(open_idx)
             seen.add(it["idx"])
+            matched_open.add(open_idx)
             lo = next(p for p, x in enumerate(items) if x["idx"] == open_idx)
             blocks.append({
                 "owner": base,
@@ -1210,11 +1232,33 @@ def _owner_brackets(items: list[dict]) -> list[dict]:
             continue
         if text:
             opens.setdefault(low, []).append(it["idx"])
+
+    # Unclosed openings: no `(koniec)` anywhere. Bound each one at the next
+    # opening remark (another person's block) or the end of the ACL - never
+    # past it, or we would sweep up unrelated entries.
+    for low, idxs in opens.items():
+        for open_idx in idxs:
+            if open_idx in matched_open:
+                continue
+            lo = next(p for p, x in enumerate(items) if x["idx"] == open_idx)
+            owner = (items[lo].get("text") or "").strip()
+            if not owner or not _looks_like_person(owner):
+                continue
+            later_opens = sorted(
+                i["idx"] for i in items[lo + 1:]
+                if i["kind"] == "remark"
+                and not (i.get("text") or "").strip().lower()
+                .endswith(OWNER_CLOSE_MARK))
+            end_idx = later_opens[0] if later_opens else None
+            idxs_range = [x["idx"] for x in items[lo:]
+                          if end_idx is None or x["idx"] < end_idx]
+            blocks.append({"owner": owner, "open_idx": open_idx,
+                            "close_idx": None, "idxs": idxs_range})
     return blocks
 
 
 def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
-                      owner_of=None) -> dict:
+                      owner_of=None, drop_whole_block: bool = False) -> dict:
     """Remove one computer's entries plus its person's remark bracket.
 
     `pc_ip` is the address of the person who lost access. Every permit/deny
@@ -1286,17 +1330,65 @@ def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
         elif verdict == "covers":
             covers.append(it["text"])
 
+    # Remarks of the target person that carry no sequence number: IOS prints
+    # numbers in running-config, but a hand-built ACL may not. They cannot
+    # be removed with `no <seq>`, so they must be reported instead of
+    # silently left behind (that looked like 'remarks are not removed').
+    target_name = resolved.lower()
+    for it in items:
+        if it["kind"] != "remark" or it["seq"] is not None:
+            continue
+        text = (it.get("text") or "").strip()
+        low = text.lower()
+        is_owner_line = bool(target_name) and (
+            low == target_name
+            or (low.endswith(OWNER_CLOSE_MARK)
+                and low[:-len(OWNER_CLOSE_MARK)].strip() == target_name))
+        if is_owner_line:
+            unsequenced.append(it["text"])
+
     drop: set[int] = set(exact)
     kept_bracket = ""
-    for b in _owner_brackets(items):
+    block_extra_aces = 0
+    brackets = _owner_brackets(items)
+
+    def _close_pos(b: dict) -> int:
+        """End position of a bracket; an unclosed one runs to the ACL end."""
+        return b["close_idx"] if b["close_idx"] is not None else len(items)
+
+    def _encloses(outer: dict, inner: dict) -> bool:
+        return (outer["open_idx"] < inner["open_idx"]
+                and _close_pos(outer) >= _close_pos(inner))
+
+    # A bracket can be nested (another person's block inside this one, or a
+    # descriptive remark). Those lines belong to somebody else and must
+    # never be deleted just because they sit inside our range. Only the
+    # OUTERMOST bracket holding a hit is processed; a nested one would
+    # otherwise be handled on its own and delete the other person's block.
+    for b in brackets:
         if not any(i in exact for i in b["idxs"]):
             continue  # no direct hit inside: never guess
+        if any(other is not b and _encloses(other, b)
+               and any(i in exact for i in other["idxs"])
+               for other in brackets):
+            continue  # an enclosing bracket owns this range
+        inner_foreign: set[int] = set()
+        for other in brackets:
+            if other is b:
+                continue
+            if (_encloses(b, other)
+                    and other["owner"].lower() != b["owner"].lower()):
+                inner_foreign.update(other["idxs"])
+        # ACEs of this bracket that stay (they cover other addresses).
         left = [i for i in b["idxs"]
-                if i not in exact and items[i]["kind"] == "ace"]
-        if left:
+                if i not in exact and i not in inner_foreign
+                and items[i]["kind"] == "ace"]
+        if left and not drop_whole_block:
             kept_bracket = kept_bracket or b["owner"]
             continue  # person still has other entries here
-        drop.update(b["idxs"])
+        if left:
+            block_extra_aces += len(left)
+        drop.update(i for i in b["idxs"] if i not in inner_foreign)
 
     deletes: list[int] = []
     keep: list[str] = []
@@ -1314,7 +1406,7 @@ def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
             keep.append(entries[it["idx"]])
 
     if resolved:
-        for b in _owner_brackets(items):
+        for b in brackets:
             if b["owner"].lower() == resolved.lower():
                 if not any(i in exact for i in b["idxs"]):
                     kept_bracket = kept_bracket or b["owner"]
@@ -1323,12 +1415,14 @@ def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
     return {"deletes": sorted(set(deletes)), "keep": keep,
             "removed": removed_aces, "removed_remarks": removed_remarks,
             "covers": covers, "owner": resolved,
-            "unsequenced": unsequenced, "kept_bracket": kept_bracket}
+            "unsequenced": unsequenced, "kept_bracket": kept_bracket,
+            "block_extra_aces": block_extra_aces}
 
 
 def build_removal_blocks(devices: list[tuple[str, str, dict]], pc_ip: str,
                         owner: str = "", owner_of=None,
-                        only: str = "") -> dict:
+                        only: str = "",
+                        drop_whole_block: bool = False) -> dict:
     """Build one clearly separated removal block per device.
 
     `devices` is [(host, label, {acl_name: [entries]}), ...] in display
@@ -1337,23 +1431,31 @@ def build_removal_blocks(devices: list[tuple[str, str, dict]], pc_ip: str,
     pasted separately and nothing is mixed between them. Devices without
     hits are dropped from `blocks` but counted in `skipped`.
 
+    `drop_whole_block` removes the person's whole remark block, including
+    their other computers - use it when the person leaves for good rather
+    than losing one machine.
+
     Returns {"blocks": [{"host", "label", "script", "removed",
     "removed_remarks", "acls_hit", "covers", "unsequenced"}],
     "removed", "removed_remarks", "covers", "unsequenced", "owner",
-    "hosts_hit", "skipped"}.
+    "hosts_hit", "skipped", "kept_brackets"}.
     """
     blocks: list[dict] = []
     total_aces = 0
     total_remarks = 0
     covers_all: list[str] = []
     unsequenced_all: list[str] = []
+    kept_all: list[str] = []
     resolved = ""
     hosts_hit: list[str] = []
     skipped: list[str] = []
     for host, label, acls in devices or []:
         res = build_removal_script(acls or {}, pc_ip, owner=owner,
-                                   owner_of=owner_of, only=only)
+                                   owner_of=owner_of, only=only,
+                                   drop_whole_block=drop_whole_block)
         resolved = resolved or res.get("owner", "")
+        kept_all.extend(f"{label or host}: {t}"
+                        for t in res.get("kept_brackets") or [])
         if not res["script"] and not res["unsequenced"]:
             skipped.append(label or host)
             continue
@@ -1369,21 +1471,26 @@ def build_removal_blocks(devices: list[tuple[str, str, dict]], pc_ip: str,
                        "removed_remarks": res["removed_remarks"],
                        "acls_hit": res["acls_hit"],
                        "covers": res["covers"],
-                       "unsequenced": res["unsequenced"]})
+                       "unsequenced": res["unsequenced"],
+                       "kept_brackets": res.get("kept_brackets") or []})
     return {"blocks": blocks, "removed": total_aces,
             "removed_remarks": total_remarks, "covers": covers_all,
             "unsequenced": unsequenced_all, "owner": resolved,
-            "hosts_hit": hosts_hit, "skipped": skipped}
+            "hosts_hit": hosts_hit, "skipped": skipped,
+            "kept_brackets": kept_all}
 
 
 def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
                          owner: str = "", owner_of=None,
-                         only: str = "") -> dict:
+                         only: str = "",
+                         drop_whole_block: bool = False) -> dict:
     """Remove a person's entries across ACLs and build the paste script.
 
     `only` limits the run to one ACL name (case-insensitive); empty means
-    every fetched ACL. Returns {"script", "per_acl", "removed",
-    "removed_remarks", "covers", "owner", "acls_hit", "unsequenced"}.
+    every fetched ACL. `drop_whole_block` removes the person's whole remark
+    block, including entries for their other computers.
+    Returns {"script", "per_acl", "removed", "removed_remarks", "covers",
+    "owner", "acls_hit", "unsequenced", "kept_brackets"}.
     """
     want = (only or "").strip().lower()
     per_acl: dict[str, dict] = {}
@@ -1392,12 +1499,17 @@ def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
     total_remarks = 0
     covers_all: list[str] = []
     unsequenced_all: list[str] = []
+    kept_all: list[str] = []
     resolved = ""
     for name, entries in (acls or {}).items():
         if want and name.lower() != want:
             continue
-        res = remove_ip_entries(entries, pc_ip, owner=owner, owner_of=owner_of)
+        res = remove_ip_entries(entries, pc_ip, owner=owner,
+                                owner_of=owner_of,
+                                drop_whole_block=drop_whole_block)
         resolved = resolved or res["owner"]
+        if res.get("kept_bracket"):
+            kept_all.append(f"{name}: {res['kept_bracket']}")
         if not res["deletes"] and not res["unsequenced"]:
             continue
         per_acl[name] = res
@@ -1412,4 +1524,4 @@ def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
             "per_acl": per_acl, "removed": total_aces,
             "removed_remarks": total_remarks, "covers": covers_all,
             "owner": resolved, "acls_hit": list(per_acl),
-            "unsequenced": unsequenced_all}
+            "unsequenced": unsequenced_all, "kept_brackets": kept_all}
