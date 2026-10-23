@@ -1,4 +1,10 @@
-"""Remove one person's IP from ACLs (lost-access cleanup) tab logic."""
+"""Remove one person's IP from ACLs (lost-access cleanup) tab logic.
+
+Supports several devices at once (e.g. an HA pair of switches): every
+selected device is fetched, and the removal script is rendered as one
+clearly separated block per device with its own Copy button, so nothing
+gets pasted onto the wrong switch.
+"""
 
 from __future__ import annotations
 
@@ -16,43 +22,58 @@ from i18n import STRINGS
 class RemoveTabMixin:
     """Tab-owned App methods (mixed into App)."""
 
+    # ---------- small text helpers ----------
+
     def _set_remove_cur(self, content: str):
         self.txt_remove_cur.configure(state="normal")
         self.txt_remove_cur.delete("1.0", tk.END)
         self.txt_remove_cur.insert("1.0", content)
         self.txt_remove_cur.configure(state="disabled")
 
-    def _set_remove_prop(self, content: str):
-        self.txt_remove_prop.configure(state="normal")
-        self.txt_remove_prop.delete("1.0", tk.END)
-        self.txt_remove_prop.insert("1.0", content)
-        self.txt_remove_prop.configure(state="disabled")
+    def _copy_text(self, text: str):
+        if not (text or "").strip():
+            messagebox.showinfo("ACL", self.T("nothing_to_copy"))
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._toast(self.T("copied"))
 
-    # ---------- fetching ----------
+    # ---------- device selection ----------
 
-    def _remove_selected_host(self) -> str:
-        """Host of the device currently chosen in this tab's dropdown."""
-        dev = self._lookup_device(self.remove_dev_var.get().strip())
-        return (dev or {}).get("host", "") or ""
+    def _remove_selected_devices(self) -> list[dict]:
+        """Devices currently highlighted in the multi-select list."""
+        out: list[dict] = []
+        try:
+            idxs = self.list_remove_dev.curselection()
+        except tk.TclError:
+            return out
+        labels = list(self._remove_dev_labels)
+        for i in idxs:
+            if 0 <= i < len(labels):
+                dev = self._lookup_device(labels[i])
+                if dev is not None:
+                    out.append(dev)
+        return out
+
+    def _remove_selected_hosts(self) -> list[str]:
+        return [d.get("host", "") for d in self._remove_selected_devices()]
 
     def _remove_state_is_current(self) -> bool:
-        """True only when the fetched ACLs belong to the selected device.
+        """True only when the fetched ACLs match the current selection.
 
-        The ACLs are fetched once and kept in memory; changing the device
-        dropdown does not re-fetch anything. Without this check the preview
-        happily produced removal lines from device A's ACLs while device B
-        was selected - i.e. a script for the wrong switch.
+        ACLs are fetched once and kept in memory; changing the selection
+        does not re-fetch. Without this check the preview produced removal
+        lines from device A while device B was selected - a script for the
+        wrong switch.
         """
-        if not self._remove_acls or not self._remove_host:
+        if not self._remove_fetched:
             return False
-        sel = self._remove_selected_host()
-        return bool(sel) and sel == self._remove_host
+        sel = {h for h in self._remove_selected_hosts() if h}
+        return bool(sel) and sel == set(self._remove_fetched)
 
     def _reset_remove_state(self, note: str = ""):
-        """Forget fetched ACLs and any preview built from them."""
-        self._remove_acls = {}
-        self._remove_host = ""
-        self._remove_proposal = ""
+        self._remove_fetched = {}
+        self._remove_blocks = []
         try:
             self.combo_remove_acl.configure(values=[])
             self.remove_acl_var.set("")
@@ -61,16 +82,51 @@ class RemoveTabMixin:
         except tk.TclError:
             pass
         self._set_remove_cur("")
-        self._set_remove_prop("")
+        self._clear_remove_blocks()
         self.lbl_remove_stats.configure(text="")
         self.lbl_remove_warn.configure(text=note)
 
     def _on_remove_dev_change(self):
-        """Device switched: anything fetched from the previous one is stale."""
+        """Selection changed: anything fetched for the old set is stale."""
         if self._remove_state_is_current():
             return
-        if self._remove_host or self._remove_acls or self._remove_proposal:
+        if self._remove_fetched or self._remove_blocks:
             self._reset_remove_state(self.T("remove_stale_device"))
+
+    def _refresh_remove_hint(self):
+        """Enable/disable the fetch button hint when nothing is selected."""
+        try:
+            n = len(self._remove_selected_hosts())
+        except (tk.TclError, AttributeError):
+            n = 0
+        try:
+            self.lbl_remove_sel.configure(
+                text=self.T("remove_selected_n").format(n=n) if n else
+                self.T("remove_no_selection"))
+        except tk.TclError:
+            pass
+
+    def _refresh_remove_devices(self, labels: list[str]):
+        """Repopulate the multi-select device list, keeping the selection.
+
+        Selection is remembered by label so a refresh (device added/edited)
+        does not silently drop a switch from the pair the user picked.
+        """
+        try:
+            chosen = {self.list_remove_dev.get(i)
+                      for i in self.list_remove_dev.curselection()}
+            self.list_remove_dev.delete(0, tk.END)
+            for lbl in labels:
+                self.list_remove_dev.insert(tk.END, lbl)
+            for i, lbl in enumerate(labels):
+                if lbl in chosen:
+                    self.list_remove_dev.selection_set(i)
+        except (tk.TclError, AttributeError):
+            return
+        self._remove_dev_labels = list(labels)
+        self._refresh_remove_hint()
+
+    # ---------- fetching ----------
 
     def fetch_remove_acls(self):
         if self._remove_fetching:
@@ -80,30 +136,37 @@ class RemoveTabMixin:
         if not self.devices:
             messagebox.showwarning("ACL", self.T("status_no_devices"))
             return
-        dev = self._lookup_device(self.remove_dev_var.get().strip())
-        if dev is None:
+        devs = self._remove_selected_devices()
+        if not devs:
             messagebox.showwarning("ACL", self.T("remove_need_dev"))
             return
         self._remove_fetching = True
         self.btn_remove_fetch.configure(state="disabled")
         self.remove_prog.pack(side="left", padx=(14, 0))
         self.remove_prog.start(12)
-        self.status.set(self.T("remove_fetching").format(host=dev["host"]))
-        threading.Thread(target=self._remove_fetch_worker, args=(dev,),
+        self.status.set(self.T("remove_fetching").format(
+            host=", ".join(d["host"] for d in devs)))
+        threading.Thread(target=self._remove_fetch_worker, args=(devs,),
                          daemon=True).start()
 
-    def _remove_fetch_worker(self, dev: dict):
-        try:
-            cfg = cisco_ssh.fetch_config(
-                dev["host"], dev["username"], dev.get("password", ""),
-                dev.get("enable") or None, int(dev.get("port", 22)),
-                debug_log=self._ssh_debug_log())
-            acls = acl_parser.parse_running_config(cfg)
-            self.msg_queue.put(("remove_list", (dev["host"], acls)))
-        except Exception as e:
-            self.msg_queue.put(("remove_error", (dev["host"], str(e))))
+    def _remove_fetch_worker(self, devs: list[dict]):
+        fetched: dict[str, dict] = {}
+        errors: list[tuple[str, str]] = []
+        for dev in devs:
+            try:
+                cfg = cisco_ssh.fetch_config(
+                    dev["host"], dev["username"], dev.get("password", ""),
+                    dev.get("enable") or None, int(dev.get("port", 22)),
+                    debug_log=self._ssh_debug_log())
+                fetched[dev["host"]] = {
+                    "label": self.dev_label(dev),
+                    "acls": acl_parser.parse_running_config(cfg),
+                }
+            except Exception as e:  # one bad switch must not kill the rest
+                errors.append((self.dev_label(dev), str(e)))
+        self.msg_queue.put(("remove_list", (fetched, errors)))
 
-    def _finish_remove_fetch(self, host: str, acls: dict):
+    def _finish_remove_fetch(self, fetched: dict, errors: list):
         self._remove_fetching = False
         self.btn_remove_fetch.configure(state="normal")
         try:
@@ -112,13 +175,19 @@ class RemoveTabMixin:
             pass
         self.remove_prog.pack_forget()
         self.status.set(self.T("status_ready"))
-        self._remove_acls = acls
-        self._remove_host = host
-        names = sorted(acls)
-        self.combo_remove_acl.configure(values=names)
-        if self.remove_acl_var.get() not in names:
-            self.remove_acl_var.set(names[0] if names else "")
-        self.show_remove_acl()
+        self._remove_fetched = fetched
+        names: set[str] = set()
+        for info in fetched.values():
+            names.update(info["acls"])
+        names_sorted = sorted(names)
+        self.combo_remove_acl.configure(values=names_sorted)
+        if self.remove_acl_var.get() not in names_sorted:
+            self.remove_acl_var.set(names_sorted[0] if names_sorted else "")
+        self._show_remove_acls()
+        if errors:
+            messagebox.showwarning(
+                "ACL", self.T("remove_partial_fail").format(
+                    detail="\n".join(f"{lbl}: {err}" for lbl, err in errors)))
 
     def _finish_remove_fetch_error(self, host: str, err: str):
         self._remove_fetching = False
@@ -132,18 +201,40 @@ class RemoveTabMixin:
         messagebox.showerror(
             "ACL", self.T("gen_fetch_fail").format(host=host, err=err))
 
-    def show_remove_acl(self):
+    def _show_remove_acls(self):
+        """Preview the selected ACL as fetched on each device."""
         name = self.remove_acl_var.get().strip()
-        if not name or name not in self._remove_acls:
+        if not self._remove_fetched:
             self._set_remove_cur("")
             return
-        entries = self._remove_acls.get(name, [])
-        if entries:
-            self._set_remove_cur(f"ip access-list extended {name}\n"
-                                 + "\n".join(f"    {e}" for e in entries) + "\n")
-        else:
-            self._set_remove_cur(f"ip access-list extended {name}\n"
-                                 f"    {self.T('audit_empty')}\n")
+        parts: list[str] = []
+        if self.remove_all_var.get():
+            for info in self._remove_fetched.values():
+                parts.append(f"### {info['label']}")
+                for acl in sorted(info["acls"]):
+                    parts.append(f"ip access-list extended {acl}")
+                    entries = info["acls"].get(acl) or []
+                    if entries:
+                        parts.extend(f"    {e}" for e in entries)
+                    else:
+                        parts.append(f"    {self.T('audit_empty')}")
+                parts.append("")
+            self._set_remove_cur("\n".join(parts).rstrip() + "\n")
+            return
+        if not name:
+            self._set_remove_cur("")
+            return
+        for info in self._remove_fetched.values():
+            parts.append(f"### {info['label']}")
+            entries = info["acls"].get(name) or []
+            if entries:
+                parts.append(f"ip access-list extended {name}")
+                parts.extend(f"    {e}" for e in entries)
+            else:
+                parts.append(f"ip access-list extended {name}")
+                parts.append(f"    {self.T('remove_acl_absent')}")
+            parts.append("")
+        self._set_remove_cur("\n".join(parts).rstrip() + "\n")
 
     # ---------- preview ----------
 
@@ -173,17 +264,23 @@ class RemoveTabMixin:
             self.status.set(self.T("audit_grouping").format(server=server))
             threading.Thread(
                 target=self._remove_owner_worker,
-                args=(server, ip, only, dict(self._remove_acls)),
+                args=(server, ip, only, {h: dict(v["acls"])
+                                         for h, v in self._remove_fetched.items()},
+                      {h: v["label"] for h, v in self._remove_fetched.items()}),
                 daemon=True).start()
             return
-        # no DHCP server (or owner lookup off): brackets are still detected
-        # structurally, we just cannot name the person in the summary.
+        # no DHCP server: brackets are still detected structurally, the
+        # summary just cannot name the person.
+        self._render_remove_result(self._build_result(ip, only), ip)
 
-        res = acl_parser.build_removal_script(self._remove_acls, ip, only=only)
-        self._render_remove(res, ip)
+    def _build_result(self, ip: str, only: str, owner_of=None) -> dict:
+        devices = [(host, info["label"], info["acls"])
+                   for host, info in self._remove_fetched.items()]
+        return acl_parser.build_removal_blocks(
+            devices, ip, only=only, owner_of=owner_of)
 
     def _remove_owner_worker(self, server: str, ip: str, only: str,
-                             acls: dict):
+                             acls: dict, labels: dict):
         try:
             now = time.time()
             hit = self._dhcp_cache.get(server)
@@ -203,8 +300,10 @@ class RemoveTabMixin:
                 return dhcp_check.owner_from_description(
                     info.get("description", ""))
 
-            res = acl_parser.build_removal_script(acls, ip, only=only,
-                                                  owner_of=owner_of)
+            devices = [(host, labels.get(host, host), entries)
+                       for host, entries in acls.items()]
+            res = acl_parser.build_removal_blocks(
+                devices, ip, only=only, owner_of=owner_of)
             self.msg_queue.put(("remove_preview", (ip, res)))
         except Exception as e:
             self.msg_queue.put(("remove_preview_error", (server, str(e))))
@@ -219,12 +318,11 @@ class RemoveTabMixin:
         self.remove_prog.pack_forget()
         self.status.set(self.T("status_ready"))
         if ip != self.ent_remove_ip.get().strip():
-            return  # user edited the address meanwhile: drop stale preview
+            return  # address edited meanwhile: drop the stale preview
         if not self._remove_state_is_current():
-            # device switched while the DHCP lookup was running
             self._reset_remove_state(self.T("remove_stale_device"))
             return
-        self._render_remove(res, ip)
+        self._render_remove_result(res, ip)
 
     def _finish_remove_preview_error(self, server: str, err: str):
         self._remove_previewing = False
@@ -238,25 +336,18 @@ class RemoveTabMixin:
         messagebox.showerror(
             "ACL", self.T("audit_group_fail").format(server=server, err=err))
 
-    def _render_remove(self, res: dict, ip: str):
-        script = res.get("script", "")
-        self._remove_proposal = script
-        self._set_remove_prop(script)
+    # ---------- rendering ----------
+
+    def _clear_remove_blocks(self):
+        for child in self._remove_blocks_frame.winfo_children():
+            child.destroy()
+        self._remove_blocks = []
+
+    def _render_remove_result(self, res: dict, ip: str):
+        self._clear_remove_blocks()
+        self._remove_blocks = list(res.get("blocks") or [])
         owner = res.get("owner", "")
-        if script:
-            if owner:
-                self.lbl_remove_stats.configure(
-                    text=self.T("remove_stats").format(
-                        ip=ip, owner=owner, aces=res["removed"],
-                        remarks=res["removed_remarks"],
-                        acls=len(res.get("acls_hit", []))))
-            else:
-                self.lbl_remove_stats.configure(
-                    text=self.T("remove_stats_noowner").format(
-                        ip=ip, aces=res["removed"],
-                        remarks=res["removed_remarks"],
-                        acls=len(res.get("acls_hit", []))))
-        else:
+        if not self._remove_blocks:
             if res.get("unsequenced"):
                 self.lbl_remove_stats.configure(
                     text=self.T("remove_unsequenced").format(
@@ -264,27 +355,93 @@ class RemoveTabMixin:
             else:
                 self.lbl_remove_stats.configure(
                     text=self.T("remove_nothing").format(ip=ip))
+        elif owner:
+            self.lbl_remove_stats.configure(
+                text=self.T("remove_stats").format(
+                    ip=ip, owner=owner, aces=res["removed"],
+                    remarks=res["removed_remarks"],
+                    acls=len({a for b in self._remove_blocks
+                              for a in b["acls_hit"]}),
+                    devices=len(self._remove_blocks)))
+        else:
+            self.lbl_remove_stats.configure(
+                text=self.T("remove_stats_noowner").format(
+                    ip=ip, aces=res["removed"],
+                    remarks=res["removed_remarks"],
+                    acls=len({a for b in self._remove_blocks
+                              for a in b["acls_hit"]}),
+                    devices=len(self._remove_blocks)))
 
-        notes = list(res.get("covers") or [])
-        if res.get("unsequenced"):
-            notes.extend(res["unsequenced"])
+        for block in self._remove_blocks:
+            self._render_one_block(block)
+
+        notes: list[str] = list(res.get("covers") or [])
+        notes.extend(res.get("unsequenced") or [])
+        if res.get("skipped"):
+            notes.append(self.T("remove_skipped").format(
+                devices=", ".join(res["skipped"])))
         if notes:
             self.lbl_remove_warn.configure(
                 text=self.T("remove_warn_hdr") + "\n  " + "\n  ".join(notes))
         else:
             self.lbl_remove_warn.configure(text="")
+        self._update_remove_scroll()
+
+    def _render_one_block(self, block: dict):
+        lf = ttk.LabelFrame(self._remove_blocks_frame,
+                            text=block["label"], padding=(6, 4))
+        lf.pack(fill="x", expand=False, padx=2, pady=(2, 8))
+        head = ttk.Frame(lf)
+        head.pack(fill="x")
+        info = self.T("remove_block_stats").format(
+            aces=block["removed"], remarks=block["removed_remarks"],
+            acls=", ".join(block["acls_hit"]))
+        ttk.Label(head, text=info, foreground="blue").pack(side="left")
+        script = block["script"]
+        ttk.Button(head, text=self.T("remove_copy_block"),
+                   command=lambda t=script: self._copy_text(t)).pack(side="right")
+
+        lines = max(2, min(16, script.count("\n")))
+        txt = tk.Text(lf, wrap="none", height=lines, font=("Consolas", 10))
+        txt.insert("1.0", script)
+        txt.configure(state="disabled")
+        xs = ttk.Scrollbar(lf, orient="horizontal", command=txt.xview)
+        txt.configure(xscrollcommand=xs.set)
+        txt.pack(fill="x", expand=False, pady=(4, 0))
+        xs.pack(fill="x")
+
+    def _update_remove_scroll(self):
+        try:
+            self._remove_canvas.configure(
+                scrollregion=self._remove_canvas.bbox("all"))
+        except tk.TclError:
+            pass
+
+    def _on_remove_canvas_configure(self, event):
+        try:
+            self._remove_canvas.itemconfigure(self._remove_win,
+                                              width=event.width)
+        except tk.TclError:
+            pass
+
+    def _on_remove_mousewheel(self, event):
+        try:
+            self._remove_canvas.yview_scroll(
+                int(-1 * (event.delta / 120)), "units")
+        except (tk.TclError, AttributeError):
+            pass
 
     def copy_remove(self):
-        if not self._remove_proposal.strip():
+        """Copy every block in one go (blocks stay individually copyable)."""
+        parts = [b["script"].rstrip() for b in self._remove_blocks if b["script"]]
+        if not parts:
             messagebox.showinfo("ACL", self.T("nothing_to_copy"))
             return
-        self.clipboard_clear()
-        self.clipboard_append(self._remove_proposal)
-        self._toast(self.T("copied"))
+        self._copy_text("\n\n".join(parts) + "\n")
 
     def clear_remove(self):
-        self._remove_proposal = ""
-        self._set_remove_prop("")
+        self._clear_remove_blocks()
+        self._set_remove_cur("")
         self.lbl_remove_stats.configure(text="")
         self.lbl_remove_warn.configure(text="")
 
@@ -295,52 +452,71 @@ class RemoveTabMixin:
         self.nb.add(self.tab_remove, text="remove")
 
         rf = ttk.Frame(self.tab_remove)
-        rf.pack(fill="x", padx=10, pady=10)
+        rf.pack(fill="x", padx=10, pady=(10, 4))
+        rf.grid_columnconfigure(0, weight=0)
+        rf.grid_columnconfigure(1, weight=0)
+        rf.grid_columnconfigure(2, weight=0)
+        rf.grid_columnconfigure(3, weight=1)
+
+        # --- devices: multi-select list ---
         self.lbl_remove_dev = ttk.Label(rf, text="")
         self.lbl_remove_dev.grid(row=0, column=0, sticky="w")
-        self.remove_dev_var = tk.StringVar(value="")
-        self.combo_remove_dev = ttk.Combobox(
-            rf, textvariable=self.remove_dev_var, state="readonly", width=24,
-            values=[])
-        self.combo_remove_dev.grid(row=1, column=0, sticky="w", pady=4)
-        self.combo_remove_dev.bind("<<ComboboxSelected>>",
-                                   lambda _e: self._on_remove_dev_change())
-        self.btn_remove_fetch = ttk.Button(rf, text="",
-                                           command=self.fetch_remove_acls)
-        self.btn_remove_fetch.grid(row=1, column=1, padx=8)
+        self._remove_dev_labels: list[str] = []
+        self.list_remove_dev = tk.Listbox(
+            rf, selectmode="extended", exportselection=False, height=5,
+            width=26, font=("Consolas", 9),
+            activestyle="dotbox", takefocus=True)
+        self.list_remove_dev.grid(row=1, column=0, sticky="nsw", pady=4)
+        self.list_remove_dev.bind("<<ListboxSelect>>",
+                                  lambda _e: self._on_remove_dev_change())
+        dev_scroll = ttk.Scrollbar(rf, orient="vertical",
+                                   command=self.list_remove_dev.yview)
+        self.list_remove_dev.configure(yscrollcommand=dev_scroll.set)
+        dev_scroll.grid(row=1, column=1, sticky="ns", pady=4)
 
-        self.lbl_remove_acl = ttk.Label(rf, text="")
-        self.lbl_remove_acl.grid(row=0, column=2, sticky="w", padx=(16, 0))
+        btns_dev = ttk.Frame(rf)
+        btns_dev.grid(row=1, column=2, sticky="nw", padx=(8, 0), pady=4)
+        self.btn_remove_fetch = ttk.Button(btns_dev, text="",
+                                           command=self.fetch_remove_acls)
+        self.btn_remove_fetch.pack(anchor="w")
+        self.lbl_remove_sel = ttk.Label(btns_dev, text="", foreground="gray")
+        self.lbl_remove_sel.pack(anchor="w", pady=(4, 0))
+
+        # --- ACL + IP ---
+        right = ttk.Frame(rf)
+        right.grid(row=1, column=3, sticky="new", padx=(16, 0), pady=4)
+        self.lbl_remove_acl = ttk.Label(right, text="")
+        self.lbl_remove_acl.grid(row=0, column=0, sticky="w")
         self.remove_acl_var = tk.StringVar(value="")
         self.combo_remove_acl = ttk.Combobox(
-            rf, textvariable=self.remove_acl_var, state="readonly", width=30,
-            values=[])
-        self.combo_remove_acl.grid(row=1, column=2, sticky="w",
-                                   padx=(16, 0), pady=4)
+            right, textvariable=self.remove_acl_var, state="readonly",
+            width=30, values=[])
+        self.combo_remove_acl.grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.combo_remove_acl.bind("<<ComboboxSelected>>",
-                                   lambda _e: self.show_remove_acl())
+                                   lambda _e: self._show_remove_acls())
         self.remove_all_var = tk.BooleanVar(value=False)
         self.chk_remove_all = ttk.Checkbutton(
-            rf, text="", variable=self.remove_all_var,
+            right, text="", variable=self.remove_all_var,
             command=self._toggle_remove_all)
-        self.chk_remove_all.grid(row=2, column=2, sticky="w", padx=(16, 0))
+        self.chk_remove_all.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
-        self.lbl_remove_ip = ttk.Label(rf, text="")
-        self.lbl_remove_ip.grid(row=0, column=3, sticky="w", padx=(16, 0))
-        self.ent_remove_ip = ttk.Entry(rf, width=20, font=("Consolas", 10))
-        self.ent_remove_ip.grid(row=1, column=3, sticky="w",
-                                padx=(16, 0), pady=4)
+        self.lbl_remove_ip = ttk.Label(right, text="")
+        self.lbl_remove_ip.grid(row=0, column=1, sticky="w", padx=(16, 0))
+        self.ent_remove_ip = ttk.Entry(right, width=20, font=("Consolas", 10))
+        self.ent_remove_ip.grid(row=1, column=1, sticky="w",
+                                padx=(16, 0), pady=(2, 0))
         self.ent_remove_ip.bind("<Return>", lambda _e: self.preview_remove())
-
         self.remove_owner_var = tk.BooleanVar(value=True)
         self.chk_remove_owner = ttk.Checkbutton(
-            rf, text="", variable=self.remove_owner_var)
-        self.chk_remove_owner.grid(row=2, column=3, sticky="w", padx=(16, 0))
+            right, text="", variable=self.remove_owner_var)
+        self.chk_remove_owner.grid(row=2, column=1, sticky="w",
+                                   padx=(16, 0), pady=(4, 0))
 
+        # --- actions ---
         rb = ttk.Frame(self.tab_remove)
-        rb.pack(fill="x", padx=10, pady=(0, 8))
+        rb.pack(fill="x", padx=10, pady=(0, 6))
         self.btn_remove_preview = ttk.Button(rb, text="",
-                                              command=self.preview_remove)
+                                             command=self.preview_remove)
         self.btn_remove_preview.pack(side="left", padx=(0, 6))
         self.btn_remove_copy = ttk.Button(rb, text="", command=self.copy_remove)
         self.btn_remove_copy.pack(side="left", padx=6)
@@ -348,12 +524,13 @@ class RemoveTabMixin:
         self.btn_remove_clear.pack(side="left", padx=6)
         self.remove_prog = ttk.Progressbar(rb, mode="indeterminate", length=120)
 
+        # --- fetched entries ---
         self.lbl_remove_cur = ttk.Label(self.tab_remove, text="")
         self.lbl_remove_cur.pack(anchor="w", padx=10, pady=(2, 2))
         cur_fr = ttk.Frame(self.tab_remove)
         cur_fr.pack(fill="both", expand=True, padx=10, pady=(0, 4))
         self.txt_remove_cur = tk.Text(cur_fr, wrap="none", font=("Consolas", 10),
-                                      height=8, state="disabled")
+                                      height=7, state="disabled")
         rys = ttk.Scrollbar(cur_fr, orient="vertical",
                             command=self.txt_remove_cur.yview)
         rxs = ttk.Scrollbar(cur_fr, orient="horizontal",
@@ -366,30 +543,38 @@ class RemoveTabMixin:
         cur_fr.grid_rowconfigure(0, weight=1)
         cur_fr.grid_columnconfigure(0, weight=1)
 
+        # --- result: one block per device, scrollable ---
         self.lbl_remove_stats = ttk.Label(self.tab_remove, text="",
                                           foreground="blue")
         self.lbl_remove_stats.pack(anchor="w", padx=10)
         self.lbl_remove_warn = ttk.Label(self.tab_remove, text="",
-                                         foreground="#b36b00")
-        self.lbl_remove_warn.pack(anchor="w", padx=10)
+                                         foreground="#b36b00",
+                                         wraplength=980, justify="left")
+        self.lbl_remove_warn.pack(anchor="w", fill="x", padx=10)
         self.lbl_remove_prop = ttk.Label(self.tab_remove, text="")
-        self.lbl_remove_prop.pack(anchor="w", padx=10, pady=(2, 2))
+        self.lbl_remove_prop.pack(anchor="w", padx=10, pady=(4, 2))
+
         prop_fr = ttk.Frame(self.tab_remove)
-        prop_fr.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-        self.txt_remove_prop = tk.Text(prop_fr, wrap="none",
-                                       font=("Consolas", 10), height=8,
-                                       state="disabled")
-        rpys = ttk.Scrollbar(prop_fr, orient="vertical",
-                             command=self.txt_remove_prop.yview)
-        rpxs = ttk.Scrollbar(prop_fr, orient="horizontal",
-                             command=self.txt_remove_prop.xview)
-        self.txt_remove_prop.configure(yscrollcommand=rpys.set,
-                                       xscrollcommand=rpxs.set)
-        self.txt_remove_prop.grid(row=0, column=0, sticky="nsew")
-        rpys.grid(row=0, column=1, sticky="ns")
-        rpxs.grid(row=1, column=0, sticky="ew")
+        prop_fr.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self._remove_canvas = tk.Canvas(prop_fr, highlightthickness=0,
+                                        borderwidth=0)
+        p_ys = ttk.Scrollbar(prop_fr, orient="vertical",
+                             command=self._remove_canvas.yview)
+        self._remove_canvas.configure(yscrollcommand=p_ys.set)
+        self._remove_canvas.grid(row=0, column=0, sticky="nsew")
+        p_ys.grid(row=0, column=1, sticky="ns")
         prop_fr.grid_rowconfigure(0, weight=1)
         prop_fr.grid_columnconfigure(0, weight=1)
+
+        self._remove_blocks_frame = ttk.Frame(self._remove_canvas)
+        self._remove_win = self._remove_canvas.create_window(
+            (0, 0), window=self._remove_blocks_frame, anchor="nw")
+        self._remove_blocks_frame.bind(
+            "<Configure>", lambda _e: self._update_remove_scroll())
+        self._remove_canvas.bind("<Configure>",
+                                 self._on_remove_canvas_configure)
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._remove_canvas.bind(seq, self._on_remove_mousewheel)
 
     def _toggle_remove_all(self):
         state = "disabled" if self.remove_all_var.get() else "readonly"
@@ -397,6 +582,7 @@ class RemoveTabMixin:
             self.combo_remove_acl.configure(state=state)
         except tk.TclError:
             pass
+        self._show_remove_acls()
 
     def _apply_remove_language(self):
         S = STRINGS[self.lang]
@@ -407,7 +593,8 @@ class RemoveTabMixin:
         self.lbl_remove_ip.configure(text=S["remove_ip_label"])
         self.chk_remove_owner.configure(text=S["remove_owner_label"])
         self.btn_remove_preview.configure(text=S["remove_preview_btn"])
-        self.btn_remove_copy.configure(text=S["copy_btn"])
+        self.btn_remove_copy.configure(text=S["remove_copy_all"])
         self.btn_remove_clear.configure(text=S["clear_btn"])
         self.lbl_remove_cur.configure(text=S["remove_current_label"])
         self.lbl_remove_prop.configure(text=S["remove_proposal_label"])
+        self._refresh_remove_hint()

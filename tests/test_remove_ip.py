@@ -159,5 +159,79 @@ class RemoveScriptTest(unittest.TestCase):
         self.assertEqual(out["acls_hit"], [])
 
 
+class RemovalBlocksTest(unittest.TestCase):
+    """Multi-device (HA pair) removal: one separated block per switch."""
+
+    def _pair(self, second_entries=None):
+        return [
+            ("10.0.0.1", "sw-a 10.0.0.1", {"CAM-IN": _acl_with_block()}),
+            ("10.0.0.2", "sw-b 10.0.0.2",
+             {"CAM-IN": second_entries
+              if second_entries is not None else _acl_with_block()}),
+        ]
+
+    def test_one_block_per_device(self):
+        out = acl_parser.build_removal_blocks(self._pair(), PC)
+        self.assertEqual(len(out["blocks"]), 2)
+        self.assertEqual([b["label"] for b in out["blocks"]],
+                         ["sw-a 10.0.0.1", "sw-b 10.0.0.2"])
+        self.assertEqual(out["hosts_hit"], ["10.0.0.1", "10.0.0.2"])
+
+    def test_each_block_has_its_own_script(self):
+        out = acl_parser.build_removal_blocks(self._pair(), PC)
+        for b in out["blocks"]:
+            self.assertIn("ip access-list extended CAM-IN", b["script"])
+            self.assertIn("no 20", b["script"])
+            self.assertIn("no 30", b["script"])
+            self.assertIn("no 40", b["script"])
+        # scripts are independent strings, not one merged blob
+        self.assertIsNot(out["blocks"][0]["script"],
+                         out["blocks"][1]["script"])
+
+    def test_totals_are_summed_across_devices(self):
+        out = acl_parser.build_removal_blocks(self._pair(), PC)
+        self.assertEqual(out["removed"], 6)          # 3 entries x 2 devices
+        self.assertEqual(out["removed_remarks"], 4)  # 2 remarks x 2 devices
+
+    def test_device_without_hits_is_skipped_not_faked(self):
+        pair = self._pair(second_entries=[
+            "10 permit ip host 10.9.9.9 host 10.9.9.10"])
+        out = acl_parser.build_removal_blocks(pair, PC)
+        self.assertEqual(len(out["blocks"]), 1)
+        self.assertEqual(out["hosts_hit"], ["10.0.0.1"])
+        self.assertEqual(out["skipped"], ["sw-b 10.0.0.2"])
+
+    def test_only_filters_on_every_device(self):
+        pair = [
+            ("10.0.0.1", "sw-a", {"CAM-IN": _acl_with_block(),
+                                    "CAM-OUT": [f"10 permit ip host {PC} host {CAM1}"]}),
+            ("10.0.0.2", "sw-b", {"CAM-IN": _acl_with_block(),
+                                    "CAM-OUT": [f"10 permit ip host {PC} host {CAM1}"]}),
+        ]
+        out = acl_parser.build_removal_blocks(pair, PC, only="cam-out")
+        for b in out["blocks"]:
+            self.assertEqual(b["acls_hit"], ["CAM-OUT"])
+            self.assertNotIn("CAM-IN", b["script"])
+
+    def test_no_devices_or_no_hits(self):
+        self.assertEqual(acl_parser.build_removal_blocks([], PC)["blocks"], [])
+        out = acl_parser.build_removal_blocks(
+            [("10.0.0.1", "sw-a", {"X": ["10 permit ip host 1.1.1.1 host 2.2.2.2"]})],
+            PC)
+        self.assertEqual(out["blocks"], [])
+        self.assertEqual(out["skipped"], ["sw-a"])
+
+    def test_owner_resolved_once_and_shared(self):
+        out = acl_parser.build_removal_blocks(
+            self._pair(), PC, owner_of=lambda ip: "Jan Kowalski")
+        self.assertEqual(out["owner"], "Jan Kowalski")
+        self.assertEqual(len(out["blocks"]), 2)
+
+    def test_blank_label_falls_back_to_host(self):
+        out = acl_parser.build_removal_blocks(
+            [("10.0.0.1", "", {"CAM-IN": _acl_with_block()})], PC)
+        self.assertEqual(out["blocks"][0]["label"], "10.0.0.1")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -244,9 +244,8 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self._audit_proposal = ""
         self._audit_fetching = False
         self._audit_grouping = False
-        self._remove_acls: dict[str, list[str]] = {}
-        self._remove_host = ""
-        self._remove_proposal = ""
+        self._remove_fetched: dict[str, dict] = {}  # host -> {label, acls}
+        self._remove_blocks: list[dict] = []
         self._remove_fetching = False
         self._remove_previewing = False
         self._dhcp_cache: dict = {}  # server -> (timestamp, {ip: info})
@@ -1056,8 +1055,8 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                     server, err = payload
                     self._finish_audit_group_error(server, err)
                 elif kind == "remove_list":
-                    host, acls = payload
-                    self._finish_remove_fetch(host, acls)
+                    fetched, errors = payload
+                    self._finish_remove_fetch(fetched, errors)
                 elif kind == "remove_error":
                     host, err = payload
                     self._finish_remove_fetch_error(host, err)

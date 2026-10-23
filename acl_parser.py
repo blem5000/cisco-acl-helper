@@ -1326,6 +1326,56 @@ def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
             "unsequenced": unsequenced, "kept_bracket": kept_bracket}
 
 
+def build_removal_blocks(devices: list[tuple[str, str, dict]], pc_ip: str,
+                        owner: str = "", owner_of=None,
+                        only: str = "") -> dict:
+    """Build one clearly separated removal block per device.
+
+    `devices` is [(host, label, {acl_name: [entries]}), ...] in display
+    order - typically an HA pair of switches that need the same cleanup.
+    Each block carries its own paste-ready script, so every switch is
+    pasted separately and nothing is mixed between them. Devices without
+    hits are dropped from `blocks` but counted in `skipped`.
+
+    Returns {"blocks": [{"host", "label", "script", "removed",
+    "removed_remarks", "acls_hit", "covers", "unsequenced"}],
+    "removed", "removed_remarks", "covers", "unsequenced", "owner",
+    "hosts_hit", "skipped"}.
+    """
+    blocks: list[dict] = []
+    total_aces = 0
+    total_remarks = 0
+    covers_all: list[str] = []
+    unsequenced_all: list[str] = []
+    resolved = ""
+    hosts_hit: list[str] = []
+    skipped: list[str] = []
+    for host, label, acls in devices or []:
+        res = build_removal_script(acls or {}, pc_ip, owner=owner,
+                                   owner_of=owner_of, only=only)
+        resolved = resolved or res.get("owner", "")
+        if not res["script"] and not res["unsequenced"]:
+            skipped.append(label or host)
+            continue
+        hosts_hit.append(host)
+        total_aces += res["removed"]
+        total_remarks += res["removed_remarks"]
+        covers_all.extend(f"{label or host}: {t}" for t in res["covers"])
+        unsequenced_all.extend(
+            f"{label or host}: {t}" for t in res["unsequenced"])
+        blocks.append({"host": host, "label": label or host,
+                       "script": res["script"],
+                       "removed": res["removed"],
+                       "removed_remarks": res["removed_remarks"],
+                       "acls_hit": res["acls_hit"],
+                       "covers": res["covers"],
+                       "unsequenced": res["unsequenced"]})
+    return {"blocks": blocks, "removed": total_aces,
+            "removed_remarks": total_remarks, "covers": covers_all,
+            "unsequenced": unsequenced_all, "owner": resolved,
+            "hosts_hit": hosts_hit, "skipped": skipped}
+
+
 def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
                          owner: str = "", owner_of=None,
                          only: str = "") -> dict:
