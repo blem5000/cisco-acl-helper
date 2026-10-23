@@ -259,3 +259,293 @@ def common_clearing(interfaces: list[dict]) -> str:
     if not counts:
         return ""
     return max(counts, key=lambda k: counts[k])
+
+
+# ---------------------------------------------------------------- PoE ----
+
+#: `show power inline` budget header (classic IOS / IOS-XE).
+_POE_AVAILABLE = re.compile(r"Available:\s*([\d.]+)\s*\(?w", re.IGNORECASE)
+_POE_USED = re.compile(r"Used:\s*([\d.]+)\s*\(?w", re.IGNORECASE)
+_POE_LEFT = re.compile(r"Remaining:\s*([\d.]+)\s*\(?w", re.IGNORECASE)
+
+#: Some IOS-XE stacks print a module table instead of the inline header.
+_POE_MODULE_HDR = re.compile(
+    r"^Module\b.*\bAvailable\b.*\bUsed\b.*\bRemaining\b", re.IGNORECASE)
+_POE_MODULE_ROW = re.compile(
+    r"^\d+\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$")
+
+#: Per-port table columns (`Admin` and `Oper` state words).
+_POE_ADMIN = {"auto", "never", "static", "off"}
+_POE_OPER = {"on", "off", "faulty", "deny", "err-disable", "n/a",
+             "power-deny", "unknown"}
+
+
+def _poe_header(regex: re.Pattern, text: str) -> float | None:
+    """Sum every match of one budget header field (stack members)."""
+    values: list[float] = []
+    for m in regex.finditer(text):
+        try:
+            values.append(float(m.group(1)))
+        except ValueError:
+            pass
+    return sum(values) if values else None
+
+
+def _poe_module_totals(text: str) -> tuple[float, float, float] | None:
+    """Sum `Module Available Used Remaining` rows, if that layout is used."""
+    totals = [0.0, 0.0, 0.0]
+    found = False
+    in_table = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if _POE_MODULE_HDR.match(s):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not s:
+            in_table = False
+            continue
+        m = _POE_MODULE_ROW.match(s)
+        if m:
+            found = True
+            for i in range(3):
+                totals[i] += float(m.group(i + 1))
+    return tuple(totals) if found else None
+
+
+def parse_power_inline(output: str) -> dict:
+    """Parse `show power inline` -> PoE budget and per-port state.
+
+    Handles both layouts seen on Cisco access switches:
+
+        Available:740.0(w)  Used:131.4(w)  Remaining:608.6(w)
+        Interface Admin  Oper       Power   Device              Class Max
+        Gi1/0/1   auto   on         6.3     IP Phone 7960       2     15.4
+
+    and the `Module Available Used Remaining` table used by some
+    IOS-XE stacks. Returns {"available", "used", "remaining", "ports"}
+    where `ports` maps canon_name -> {"admin", "oper", "watts"}.
+    Budget values are None when the device did not report them.
+    """
+    text = output or ""
+    available = _poe_header(_POE_AVAILABLE, text)
+    used = _poe_header(_POE_USED, text)
+    remaining = _poe_header(_POE_LEFT, text)
+    if available is None and used is None and remaining is None:
+        table = _poe_module_totals(text)
+        if table:
+            available, used, remaining = table
+    if remaining is None and available is not None and used is not None:
+        remaining = max(0.0, available - used)
+
+    ports: dict[str, dict] = {}
+    for raw in text.splitlines():
+        parts = raw.split()
+        if len(parts) < 4:
+            continue
+        name, admin, oper = parts[0], parts[1].lower(), parts[2].lower()
+        if admin not in _POE_ADMIN or oper not in _POE_OPER:
+            continue
+        try:
+            watts = float(parts[3])
+        except ValueError:
+            continue
+        if not is_physical(name):
+            continue
+        ports[canon_name(name)] = {"admin": admin, "oper": oper,
+                                   "watts": watts}
+    return {"available": available, "used": used, "remaining": remaining,
+            "ports": ports}
+
+
+def port_idle_months(entry: dict) -> float | None:
+    """How many months a port has been idle (None = never active).
+
+    Uses the newer of the two directions, the same rule as find_unused:
+    traffic in either direction means the port was in use.
+    """
+    ages = [parse_age(entry.get("last_input", "")),
+            parse_age(entry.get("last_output", ""))]
+    ages = [a for a in ages if a is not None]
+    if not ages:
+        return None
+    return min(ages) / (MONTH_DAYS * 86400)
+
+
+def switch_snapshot(host: str, physical: list[dict], unused: list[dict],
+                    skipped: int, poe: dict | None = None) -> dict:
+    """Collect one switch's data for the reduction planner.
+
+    `physical`/`unused`/`skipped` come from parse_show_interfaces,
+    find_unused and the SFP filter. `poe` comes from parse_power_inline.
+    The result separates:
+      * used access ports and their live PoE load (what must move),
+      * free access ports and free PoE-capable ports (where it can move),
+      * idle ports and how long they have been idle (and any PoE they
+        still draw even though they carry no traffic).
+    """
+    poe = poe or {}
+    poe_ports = poe.get("ports") or {}
+    unused = unused or []
+    physical = physical or []
+    idle_names = {canon_name(e.get("name", "")) for e in unused}
+
+    idle: list[dict] = []
+    for e in unused:
+        name = e.get("name", "")
+        p = poe_ports.get(canon_name(name)) or {}
+        idle.append({
+            "name": name,
+            "status": e.get("status", ""),
+            "description": e.get("description", ""),
+            "last_input": e.get("last_input", ""),
+            "last_output": e.get("last_output", ""),
+            "months": port_idle_months(e),
+            "watts": float(p.get("watts") or 0.0),
+            "poe_on": p.get("oper") == "on",
+        })
+
+    active_poe = 0
+    active_watts = 0.0
+    poe_free = 0
+    for e in physical:
+        name = canon_name(e.get("name", ""))
+        p = poe_ports.get(name)
+        if p is None:
+            continue
+        idle_here = name in idle_names
+        if p.get("oper") == "on":
+            # Idle powered ports are not "live load" - only the ones that
+            # stay connected have to fit on the surviving switches.
+            if not idle_here:
+                active_poe += 1
+                active_watts += float(p.get("watts") or 0.0)
+        # An idle PoE port is free for a moved PD whether or not an idle
+        # device is still powered there (that device is part of the cleanup).
+        if (idle_here and p.get("oper") in ("on", "off")
+              and p.get("admin") in ("auto", "static")):
+            poe_free += 1
+
+    total = max(0, len(physical) - skipped)
+    months = [p["months"] for p in idle if p["months"] is not None]
+    return {
+        "host": host,
+        "total": total,
+        "used": max(0, total - len(unused)),
+        "free": len(unused),
+        "skipped": skipped,
+        "idle": idle,
+        "idle_count": len(idle),
+        "idle_never": sum(1 for p in idle if p["months"] is None),
+        "idle_avg": (sum(months) / len(months)) if months else None,
+        "idle_poe_ports": sum(1 for p in idle if p["poe_on"]),
+        "idle_poe_watts": sum(p["watts"] for p in idle if p["poe_on"]),
+        "active_poe": active_poe,
+        "active_watts": active_watts,
+        "poe_free": poe_free,
+        "poe_available": poe.get("available"),
+        "poe_used": poe.get("used"),
+        "poe_left": poe.get("remaining"),
+        "err": "",
+    }
+
+
+def _reduction_key(switch: dict) -> tuple:
+    """Prefer the emptiest switches, then the longest-idle ports."""
+    total = switch.get("total") or 0
+    util = (switch.get("used") or 0) / total if total else 0.0
+    avg = switch.get("idle_avg")
+    return (util, -(avg if avg is not None else 999.0))
+
+
+def plan_reduction(switches: list[dict]) -> dict:
+    """Estimate how many switches a rack can lose (greedy).
+
+    An underused switch is a removal candidate when its live ports,
+    live PoE ports and live PoE watts fit into the combined free ports,
+    free PoE ports and remaining PoE budget of the other switches.
+    Candidates are tried emptiest-first; a candidate that does not fit
+    stays and its free capacity remains available for later moves.
+
+    This is an aggregate estimate - per-port PoE limits, VLANs and
+    uplinks are not modelled. Returns:
+      removable: [{host, ports, poe_ports, watts, targets, ...}]
+      kept:      host names that must stay
+      failed:    rejected candidates with a `reason` (ports, poe_ports,
+                 power, poe_unknown)
+    """
+    live = [s for s in switches or [] if not s.get("err")]
+    if not live:
+        return {"removable": [], "kept": [], "total": 0, "needed": 0,
+                "failed": [], "reason": "no_data"}
+    if len(live) == 1:
+        return {"removable": [], "kept": [live[0]["host"]], "total": 1,
+                "needed": 1, "failed": [], "reason": "single"}
+
+    kept = list(live)
+    removable: list[dict] = []
+    failed: list[dict] = []
+    moved_ports = 0
+    moved_poe = 0
+    moved_watts = 0.0
+
+    for s in sorted(live, key=_reduction_key):
+        if len(kept) <= 1:
+            break
+        others = [o for o in kept if o is not s]
+        free_ports = sum(o.get("free", 0) for o in others) - moved_ports
+        free_poe = sum(o.get("poe_free", 0) for o in others) - moved_poe
+        known = [o for o in others if o.get("poe_left") is not None]
+        # Idle PoE ports are treated as free: their current draw comes back
+        # to the budget when the idle devices are disconnected.
+        left_watts = (sum(float(o["poe_left"])
+                          + float(o.get("idle_poe_watts") or 0.0)
+                          for o in known) - moved_watts if known else None)
+        need_ports = s.get("used", 0)
+        need_poe = s.get("active_poe", 0)
+        need_watts = float(s.get("active_watts") or 0.0)
+
+        reason = ""
+        if need_ports > free_ports:
+            reason = "ports"
+        elif need_poe > free_poe:
+            reason = "poe_ports"
+        elif need_watts > 0 and left_watts is None:
+            reason = "poe_unknown"
+        elif need_watts > (left_watts or 0.0) + 1e-9:
+            reason = "power"
+
+        entry = {
+            "host": s.get("host", ""),
+            "ports": need_ports,
+            "poe_ports": need_poe,
+            "watts": need_watts,
+            "targets": [o.get("host", "") for o in others],
+            "target_info": [
+                {"host": o.get("host", ""), "free": o.get("free", 0),
+                 "poe_free": o.get("poe_free", 0),
+                 "left": (None if o.get("poe_left") is None else
+                          float(o["poe_left"])
+                          + float(o.get("idle_poe_watts") or 0.0))}
+                for o in others
+            ],
+            "free_ports": free_ports,
+            "free_poe": free_poe,
+            "left_watts": left_watts,
+        }
+        if reason:
+            entry["reason"] = reason
+            failed.append(entry)
+            continue
+
+        removable.append(entry)
+        kept.remove(s)
+        moved_ports += need_ports
+        moved_poe += need_poe
+        moved_watts += need_watts
+
+    return {"removable": removable,
+            "kept": [s.get("host", "") for s in kept],
+            "total": len(live), "needed": len(kept),
+            "failed": failed, "reason": ""}

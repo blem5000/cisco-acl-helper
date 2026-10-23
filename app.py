@@ -1056,6 +1056,9 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                 elif kind == "ports_rack_list":
                     group, months, ordered = payload
                     self._finish_ports_rack(group, months, ordered)
+                elif kind == "ports_opt_list":
+                    group, months, rows = payload
+                    self._finish_ports_optimize(group, months, rows)
                 elif kind == "vlan_list":
                     host, rows = payload
                     self._finish_vlan_fetch(host, rows)

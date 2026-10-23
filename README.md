@@ -46,7 +46,14 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   miesiąc = 30 dni; porty SFP/uplink i management pomijane, do włączenia):
   ile ich jest i które to, ze statusem, ostatnim ruchem i opisem. Próg
   miesięcy pamiętany między uruchomieniami. Potrafi sprawdzić całą szafę
-  naraz (raport per switch + suma).
+  naraz (raport per switch + suma). Przycisk **Optymalizacja** szacuje,
+  ile switchy można wyłączyć: dla szafy porównuje aktywne porty i pobór
+  PoE z wolnymi portami, wolnymi portami PoE i pozostałym budżetem PoE
+  (`show power inline`), a porty nieaktywne od progu miesięcy traktuje
+  jako wolne (ich pobór PoE wraca do budżetu). Raport pokazuje użycie
+  portów, PoE użyte/zostało, średni czas bezczynności oraz porty, które
+  pobierają PoE mimo braku ruchu. Wynik jest szacunkiem — przed
+  przenoszeniem sprawdź VLAN-y, uplinki i limity PoE na portach.
 - **Szukanie adresu** — namierzanie IP: `show ip arp` → MAC →
   `show mac address-table` → port → sąsiad `show cdp neighbors detail`.
   Przycisk kontynuacji prowadzi ślad przez kolejne switche (dopasowanie sąsiada

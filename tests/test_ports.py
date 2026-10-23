@@ -4,6 +4,7 @@ import ast
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -162,13 +163,210 @@ class RackHelpersTest(unittest.TestCase):
         self.assertEqual(tab_ports.rack_devices(self.DEVS, "Brak"), [])
 
 
+POWER_IOS = """
+Available:370.0(w)  Used:28.0(w)  Remaining:342.0(w)
+
+Interface Admin  Oper       Power   Device              Class Max
+                            (Watts)
+--------- ------ ---------- ------- ------------------- ----- ----
+Gi1/0/1   auto   on         6.3     IP Phone 7960       2     15.4
+Gi1/0/2   auto   off        0.0     n/a                 n/a   15.4
+Gi1/0/3   auto   on         15.4    Ieee PD             0     15.4
+Gi1/0/4   never  off        0.0     n/a                 n/a   15.4
+"""
+
+POWER_XE = """
+Module   Available     Used     Remaining
+          (Watts)     (Watts)    (Watts)
+------   ---------   --------   ---------
+1          1090.0       88.0       1002.0
+2           740.0       21.7        718.3
+"""
+
+
+class PowerInlineTest(unittest.TestCase):
+    def test_ios_header_and_ports(self):
+        poe = ports.parse_power_inline(POWER_IOS)
+        self.assertEqual(poe["available"], 370.0)
+        self.assertEqual(poe["used"], 28.0)
+        self.assertEqual(poe["remaining"], 342.0)
+        self.assertEqual(poe["ports"]["gigabitethernet1/0/1"],
+                         {"admin": "auto", "oper": "on", "watts": 6.3})
+        self.assertEqual(poe["ports"]["gigabitethernet1/0/4"]["oper"], "off")
+
+    def test_module_table(self):
+        poe = ports.parse_power_inline(POWER_XE)
+        self.assertEqual(poe["available"], 1830.0)
+        self.assertEqual(poe["used"], 109.7)
+        self.assertEqual(poe["remaining"], 1720.3)
+        self.assertEqual(poe["ports"], {})
+
+    def test_derives_remaining(self):
+        poe = ports.parse_power_inline(
+            "Available:370.0(w)  Used:45.2(w)")
+        self.assertAlmostEqual(poe["remaining"], 324.8)
+
+    def test_empty(self):
+        poe = ports.parse_power_inline("")
+        self.assertIsNone(poe["available"])
+        self.assertIsNone(poe["used"])
+        self.assertIsNone(poe["remaining"])
+        self.assertEqual(poe["ports"], {})
+
+
+class IdleMonthsTest(unittest.TestCase):
+    def test_uses_the_newer_direction(self):
+        self.assertAlmostEqual(
+            ports.port_idle_months({"last_input": "3w4d",
+                                    "last_output": "1w0d"}), 7 / 30)
+        self.assertLess(
+            ports.port_idle_months({"last_input": "never",
+                                    "last_output": "00:00:01"}), 0.001)
+
+    def test_never_is_none(self):
+        self.assertIsNone(ports.port_idle_months(
+            {"last_input": "never", "last_output": "never"}))
+        self.assertIsNone(ports.port_idle_months({}))
+
+
+class SnapshotTest(unittest.TestCase):
+    @staticmethod
+    def entry(name, last_input="never", last_output="never"):
+        return {"name": name, "status": "down", "protocol": "down",
+                "description": "", "last_input": last_input,
+                "last_output": last_output, "last_clearing": "never"}
+
+    def test_poe_split(self):
+        physical = [self.entry("Gi1/0/1"), self.entry("Gi1/0/2"),
+                    self.entry("Gi1/0/3"), self.entry("Gi1/0/4")]
+        unused = physical[:2]
+        snap = ports.switch_snapshot("sw1", physical, unused, 0,
+                                     ports.parse_power_inline(POWER_IOS))
+        self.assertEqual(snap["total"], 4)
+        self.assertEqual(snap["used"], 2)
+        self.assertEqual(snap["free"], 2)
+        self.assertEqual(snap["idle_count"], 2)
+        self.assertEqual(snap["idle_poe_ports"], 1)
+        self.assertEqual(snap["idle_poe_watts"], 6.3)
+        self.assertEqual(snap["active_poe"], 1)
+        self.assertEqual(snap["active_watts"], 15.4)
+        # both idle PoE ports count as free (the powered one is cleanup too)
+        self.assertEqual(snap["poe_free"], 2)
+        self.assertEqual(snap["poe_left"], 342.0)
+        self.assertEqual(snap["idle_never"], 2)
+
+    def test_without_poe_data(self):
+        phys = [self.entry("Gi1/0/1"), self.entry("Gi1/0/2")]
+        snap = ports.switch_snapshot("sw1", phys, phys[:1], 0, {})
+        self.assertEqual((snap["total"], snap["used"], snap["free"]),
+                         (2, 1, 1))
+        self.assertEqual(snap["active_poe"], 0)
+        self.assertIsNone(snap["poe_left"])
+
+
+class PlanReductionTest(unittest.TestCase):
+    @staticmethod
+    def sw(host, total, used, poe_free=0, left=0.0, poe_ports=0,
+           watts=0.0, avg=0.0):
+        return {"host": host, "total": total, "used": used,
+                "free": total - used, "poe_free": poe_free,
+                "poe_left": left, "active_poe": poe_ports,
+                "active_watts": watts, "idle_avg": avg, "idle_count": 1,
+                "poe_used": 0.0, "poe_available": left,
+                "idle_poe_ports": 0, "idle_poe_watts": 0.0, "err": ""}
+
+    def test_empty_and_single_switch(self):
+        self.assertEqual(ports.plan_reduction([])["reason"], "no_data")
+        got = ports.plan_reduction([self.sw("A", 48, 10)])
+        self.assertEqual(got["reason"], "single")
+        self.assertEqual(got["removable"], [])
+
+    def test_removes_underused_switches(self):
+        a = self.sw("A", 48, 40, poe_free=5, left=100.0, poe_ports=3,
+                    watts=20.0, avg=4)
+        b = self.sw("B", 48, 2, poe_free=30, left=300.0, poe_ports=2,
+                    watts=10.0, avg=8)
+        c = self.sw("C", 48, 5, poe_free=20, left=200.0, poe_ports=1,
+                    watts=6.3, avg=2)
+        got = ports.plan_reduction([a, b, c])
+        self.assertEqual([x["host"] for x in got["removable"]], ["B", "C"])
+        self.assertEqual(got["kept"], ["A"])
+        self.assertEqual(got["needed"], 1)
+
+    def test_blocks_on_ports(self):
+        a = self.sw("A", 48, 40, poe_free=5, left=100.0, avg=4)
+        b = self.sw("B", 24, 20, poe_free=0, left=0.0, avg=10)
+        got = ports.plan_reduction([a, b])
+        self.assertEqual(got["removable"], [])
+        self.assertEqual(got["failed"][0]["reason"], "ports")
+
+    def test_blocks_on_power(self):
+        a = self.sw("A", 48, 40, poe_free=5, left=30.0, poe_ports=3,
+                    watts=20.0, avg=4)
+        b = self.sw("B", 24, 1, poe_free=10, left=5.0, poe_ports=1,
+                    watts=60.0, avg=10)
+        got = ports.plan_reduction([a, b])
+        self.assertEqual(got["removable"], [])
+        self.assertEqual(got["failed"][0]["reason"], "power")
+
+    def test_blocks_when_poe_budget_unknown(self):
+        a = self.sw("A", 48, 40, poe_free=5, left=None, avg=4)
+        b = self.sw("B", 24, 1, poe_free=10, left=None, poe_ports=1,
+                    watts=10.0, avg=10)
+        got = ports.plan_reduction([a, b])
+        self.assertEqual(got["removable"], [])
+        self.assertEqual(got["failed"][0]["reason"], "poe_unknown")
+
+    def test_idle_poe_draw_returns_to_budget(self):
+        a = self.sw("A", 48, 10, poe_free=2, left=0.0, avg=4)
+        a["idle_poe_watts"] = 10.0
+        b = self.sw("B", 24, 1, poe_free=0, left=0.0, poe_ports=1,
+                    watts=6.3, avg=10)
+        got = ports.plan_reduction([a, b])
+        self.assertEqual([x["host"] for x in got["removable"]], ["B"])
+        self.assertAlmostEqual(got["removable"][0]["target_info"][0]["left"],
+                               10.0)
+        self.assertAlmostEqual(got["removable"][0]["left_watts"], 10.0)
+
+
+class FetchPortsDataTest(unittest.TestCase):
+    dev = {"host": "10.0.0.1", "username": "u", "password": "p"}
+
+    def test_optimization_also_fetches_power_inline(self):
+        responses = {
+            "show interfaces": SAMPLE,
+            "show inventory": "",
+            "show interfaces status": "",
+            "show power inline": POWER_IOS,
+        }
+        with mock.patch.object(tab_ports.cisco_ssh, "run_commands",
+                               return_value=responses) as run:
+            data = tab_ports.fetch_ports_data(
+                self.dev, 3, True, with_power=True)
+        self.assertIn("show power inline", run.call_args.kwargs["commands"])
+        self.assertEqual(data["poe"]["remaining"], 342.0)
+
+    def test_check_does_not_fetch_power_inline(self):
+        responses = {
+            "show interfaces": SAMPLE,
+            "show inventory": "",
+            "show interfaces status": "",
+        }
+        with mock.patch.object(tab_ports.cisco_ssh, "run_commands",
+                               return_value=responses) as run:
+            data = tab_ports.fetch_ports_data(self.dev, 3, True)
+        self.assertNotIn("show power inline", run.call_args.kwargs["commands"])
+        self.assertEqual(data["poe"], {})
+
+
 class TabStructureTest(unittest.TestCase):
     def test_apply_only_uses_widgets_built_at_startup(self):
         # regression: the buttons block once slipped into a method that
         # runs after unlock, while _apply_* runs at startup -> AttributeError
-        src = open(os.path.join(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))),
-            "tab_ports.py"), encoding="utf-8").read()
+        src_path = os.path.join(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))), "tab_ports.py")
+        with open(src_path, encoding="utf-8") as fh:
+            src = fh.read()
         tree = ast.parse(src)
         methods = {n.name: n for n in ast.walk(tree)
                    if isinstance(n, ast.FunctionDef)}
