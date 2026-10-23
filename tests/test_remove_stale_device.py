@@ -67,6 +67,7 @@ def _host(devices, current="sw-a 10.0.0.1"):
     h.remove_dev_var = _Var(current)
     h.remove_acl_var = _Var("CAM-IN")
     h.remove_all_var = _Var(False)
+    h.remove_owner_var = _Var(False)
     h.ent_remove_ip = types.SimpleNamespace(get=lambda: "10.0.0.50")
     h.combo_remove_acl = _Widget()
     h.lbl_remove_stats = _Labels()
