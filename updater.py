@@ -329,6 +329,53 @@ def copy_tree(src: str, dst: str, exclude_names=(), progress_cb=None,
             progress_cb(done, total)
     if progress_cb:
         progress_cb(total, total)
+    # drop files the new release no longer ships (stale modules break imports)
+    _prune_orphans(src, dst, excluded)
+
+
+def _prune_orphans(src: str, dst: str, excluded: set[str]) -> list[str]:
+    """Delete files in `dst` that the new release no longer ships.
+
+    The copy above only ever writes files, so anything dropped from a
+    release (a removed dependency, a renamed module) survives forever in
+    the install dir. That is how a stale `_internal/yaml/_yaml.pyd` left a
+    half-broken `yaml` package behind: paramiko -> invoke -> vendored yaml
+    does `from yaml._yaml import ...`, imported the orphan, and died with
+    "module 'yaml' has no attribute 'error'" before any window appeared.
+
+    Only paths under `dst` are touched, and only when the very same
+    relative path is absent from `src`. Preserved user files and anything
+    outside the release tree are never deleted. Empty directories left
+    behind are removed too. Returns the relative paths that were removed.
+    """
+    keep: set[str] = set()
+    for root, _dirs, files in os.walk(src):
+        for fn in files:
+            # normpath is essential: relpath(root, src) is "." for the top
+            # level, and "./a.txt" never matches the "a.txt" seen below.
+            keep.add(os.path.normcase(os.path.normpath(os.path.join(
+                os.path.relpath(root, src), fn))))
+    removed: list[str] = []
+    for root, _dirs, files in os.walk(dst, topdown=False):
+        for fn in files:
+            if fn in excluded:
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.normpath(os.path.relpath(full, dst))
+            if os.path.normcase(rel) in keep:
+                continue
+            try:
+                os.remove(full)
+                removed.append(rel)
+            except OSError:
+                pass  # locked (in use) - leave it, never abort the update
+        if os.path.normcase(root) != os.path.normcase(dst):
+            try:
+                if not os.listdir(root):
+                    os.rmdir(root)
+            except OSError:
+                pass
+    return removed
 
 
 def clear_skipped_version(target_dir: str) -> None:
@@ -437,6 +484,17 @@ def write_apply_script(zip_path: str, target_dir: str, pid_to_wait: int) -> str:
         'set "SRC=%STAGE%"\r\n'
         'if exist "%STAGE%\\CiscoACLHelper\\%EXE%" set "SRC=%STAGE%\\CiscoACLHelper"\r\n'
         f'robocopy "%SRC%" "%DST%" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /XF {xf} >> "%LOG%" 2>&1\r\n'
+        "ver>nul\r\n"
+        # Same orphan cleanup as updater.copy_tree: files a release no longer
+        # ships must not linger, or a stale module breaks the next import
+        # (a leftover _internal/yaml/_yaml.pyd crashed startup with
+        # "module 'yaml' has no attribute 'error'"). /MIR mirrors _internal
+        # exactly, deleting extras. Scoped to _internal on purpose: user
+        # files (devices.enc, config.json, logs) live at the top level.
+        'if exist "%DST%\\_internal" if exist "%SRC%\\_internal" (\r\n'
+        '  robocopy "%SRC%\\_internal" "%DST%\\_internal" /MIR /R:2 /W:1 '
+        '/NFL /NDL /NJH /NJS >> "%LOG%" 2>&1\r\n'
+        ")\r\n"
         "ver>nul\r\n"
         'echo [%date% %time%] copy done, restarting >> "%LOG%"\r\n'
         'start "" "%DST%\\%EXE%"\r\n'
