@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 
 import acl_parser
 import cisco_ssh
+import devsort
 import dhcp_check
 from i18n import STRINGS
 
@@ -298,11 +299,10 @@ class GeneratorTabMixin:
         devs = [d for d in self.devices if d.get("host")]
         if only_l3:
             devs = [d for d in devs if d.get("l3", False)]
-        # L3 first, then alphabetically by label; sorted() is stable, so the
-        # stored order still breaks ties between equal labels.
-        return sorted(devs,
-                      key=lambda d: (0 if d.get("l3", False) else 1,
-                                     self.dev_label(d)))
+        # L3 first, then natural order (case-insensitive, sw2 before sw10).
+        # Plain sorted() put LGEMA before backbone1 and sw10 before sw2.
+        return sorted(devs, key=lambda d: devsort.device_sort_key(
+            d, self.dev_label))
 
     def _refresh_gen_devices(self):
         labels = [self.dev_label(d) for d in self._visible_devices()]
