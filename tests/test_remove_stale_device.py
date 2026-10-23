@@ -51,9 +51,13 @@ class _Labels(_Widget):
             self.text = kw["text"]
 
 
+class _Host(RemoveTabMixin):
+    """Real mixin instance: the state helpers must resolve via the class."""
+
+
 def _host(devices, current="sw-a 10.0.0.1"):
     """Host exposing what the preview/state logic touches."""
-    h = types.SimpleNamespace()
+    h = _Host()
     h.devices = [dict(d) for d in devices]
     h.dev_label = lambda d: f"{d.get('hostname')} {d.get('host')}".strip()
     h._lookup_device = lambda sel: next(
