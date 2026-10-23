@@ -28,6 +28,7 @@ user32 = ctypes.windll.user32
 EnumWindowsProc = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 
 DIALOG_CLASS = "#32770"
+APP_WINDOW_CLASS = "TkTopLevel"
 
 
 def _windows_of(pid: int) -> list[dict]:
@@ -83,7 +84,10 @@ def main(argv: list[str]) -> int:
         if proc.poll() is not None:
             break
         wins = _windows_of(proc.pid)
-        real = [w for w in wins if w["cls"] != DIALOG_CLASS]
+        # Tk internals (TtkMonitorClass, Wtk_TaskbarHandler, IME, ...) appear
+        # as soon as Tk initialises, so they prove nothing about the app.
+        # Only a real top-level with a non-empty title counts.
+        real = [w for w in wins if w["cls"] == APP_WINDOW_CLASS and w["title"]]
         if real:
             app_windows = real
             time.sleep(2.0)  # let the window settle
@@ -111,6 +115,9 @@ def main(argv: list[str]) -> int:
 
     if not app_windows:
         print("FAIL: no application window appeared")
+        wins = _windows_of(proc.pid)
+        for w in wins:
+            print(f"  seen: class={w['cls']!r} title={w['title']!r}")
         try:
             proc.terminate()
         except Exception:
