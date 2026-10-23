@@ -30,6 +30,48 @@ class RemoveTabMixin:
 
     # ---------- fetching ----------
 
+    def _remove_selected_host(self) -> str:
+        """Host of the device currently chosen in this tab's dropdown."""
+        dev = self._lookup_device(self.remove_dev_var.get().strip())
+        return (dev or {}).get("host", "") or ""
+
+    def _remove_state_is_current(self) -> bool:
+        """True only when the fetched ACLs belong to the selected device.
+
+        The ACLs are fetched once and kept in memory; changing the device
+        dropdown does not re-fetch anything. Without this check the preview
+        happily produced removal lines from device A's ACLs while device B
+        was selected - i.e. a script for the wrong switch.
+        """
+        if not self._remove_acls or not self._remove_host:
+            return False
+        sel = self._remove_selected_host()
+        return bool(sel) and sel == self._remove_host
+
+    def _reset_remove_state(self, note: str = ""):
+        """Forget fetched ACLs and any preview built from them."""
+        self._remove_acls = {}
+        self._remove_host = ""
+        self._remove_proposal = ""
+        try:
+            self.combo_remove_acl.configure(values=[])
+            self.remove_acl_var.set("")
+            self.remove_all_var.set(False)
+            self._toggle_remove_all()
+        except tk.TclError:
+            pass
+        self._set_remove_cur("")
+        self._set_remove_prop("")
+        self.lbl_remove_stats.configure(text="")
+        self.lbl_remove_warn.configure(text=note)
+
+    def _on_remove_dev_change(self):
+        """Device switched: anything fetched from the previous one is stale."""
+        if self._remove_state_is_current():
+            return
+        if self._remove_host or self._remove_acls or self._remove_proposal:
+            self._reset_remove_state(self.T("remove_stale_device"))
+
     def fetch_remove_acls(self):
         if self._remove_fetching:
             return
@@ -110,12 +152,12 @@ class RemoveTabMixin:
             return
         if not self._require_unlocked():
             return
+        if not self._remove_state_is_current():
+            messagebox.showwarning("ACL", self.T("remove_need_fetch"))
+            return
         ip = self.ent_remove_ip.get().strip()
         if not self._valid_ip(ip):
             messagebox.showwarning("ACL", self.T("status_bad_ip"))
-            return
-        if not self._remove_acls:
-            messagebox.showwarning("ACL", self.T("remove_need_fetch"))
             return
         only = "" if self.remove_all_var.get() else self.remove_acl_var.get().strip()
         if not only and not self.remove_all_var.get():
@@ -178,6 +220,10 @@ class RemoveTabMixin:
         self.status.set(self.T("status_ready"))
         if ip != self.ent_remove_ip.get().strip():
             return  # user edited the address meanwhile: drop stale preview
+        if not self._remove_state_is_current():
+            # device switched while the DHCP lookup was running
+            self._reset_remove_state(self.T("remove_stale_device"))
+            return
         self._render_remove(res, ip)
 
     def _finish_remove_preview_error(self, server: str, err: str):
@@ -257,6 +303,8 @@ class RemoveTabMixin:
             rf, textvariable=self.remove_dev_var, state="readonly", width=24,
             values=[])
         self.combo_remove_dev.grid(row=1, column=0, sticky="w", pady=4)
+        self.combo_remove_dev.bind("<<ComboboxSelected>>",
+                                   lambda _e: self._on_remove_dev_change())
         self.btn_remove_fetch = ttk.Button(rf, text="",
                                            command=self.fetch_remove_acls)
         self.btn_remove_fetch.grid(row=1, column=1, padx=8)
