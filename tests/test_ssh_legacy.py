@@ -71,42 +71,57 @@ class Group1HandshakeTest(unittest.TestCase):
     def test_group1_only_server_session(self):
         ssh_legacy.enable_legacy_cisco_algos()
         hostkey = paramiko.RSAKey.generate(1024)
-        srv_sock, cli_sock = socket.socketpair()
+        # Real loopback TCP, not socketpair(): Windows emulates socketpair
+        # over TCP with small buffers and no accept(), which made the
+        # handshake time out as soon as the machine was busy (a full test
+        # run adds ~35s of load). A listening socket behaves like a real
+        # server and keeps the exchange mechanics under test.
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        addr = listener.getsockname()
+        srv_sock = cli_sock = None
         server_exc = []
-        sent = threading.Event()
         client_done = threading.Event()
 
         def run_server():
-            t = Transport(srv_sock)
-            t.add_server_key(hostkey)
-            t._preferred_kex = ("diffie-hellman-group1-sha1",)
-            t._preferred_keys = ("ssh-rsa",)
+            nonlocal srv_sock
+            t = None
             try:
+                listener.settimeout(30)
+                srv_sock, _ = listener.accept()
+                t = Transport(srv_sock)
+                t.add_server_key(hostkey)
+                t._preferred_kex = ("diffie-hellman-group1-sha1",)
+                t._preferred_keys = ("ssh-rsa",)
                 t.start_server(server=_AllowAll())
-                chan = t.accept(15)
+                chan = t.accept(30)
                 self.assertIsNotNone(chan)
-                chan.settimeout(15)
+                chan.settimeout(30)
                 self.assertEqual(chan.recv(8), b"ping")
                 chan.send(b"group1-ok")
-                self.assertTrue(client_done.wait(20))
+                self.assertTrue(client_done.wait(30))
             except Exception as e:  # noqa: BLE001
                 server_exc.append(e)
             finally:
                 # teardown races prove nothing - exchange already asserted
-                try:
-                    t.close()
-                except Exception:  # noqa: BLE001, S110
-                    pass
+                if t is not None:
+                    try:
+                        t.close()
+                    except Exception:  # noqa: BLE001, S110
+                        pass
 
         th = threading.Thread(target=run_server, daemon=True)
         th.start()
+        cli_sock = socket.create_connection(addr, timeout=30)
         client = Transport(cli_sock)
         try:
-            client.start_client(timeout=10)
+            client.start_client(timeout=30)
             self.assertTrue(client.is_active())
             client.auth_password("user", "pass")
-            chan = client.open_session(timeout=10)
-            chan.settimeout(15)
+            chan = client.open_session(timeout=30)
+            chan.settimeout(30)
             chan.send(b"ping")
             got = chan.recv(16)
             self.assertEqual(got, b"group1-ok")
@@ -116,7 +131,11 @@ class Group1HandshakeTest(unittest.TestCase):
                 client.close()
             except Exception:  # noqa: BLE001, S110
                 pass
-        th.join(timeout=20)
+            try:
+                listener.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        th.join(timeout=40)
         self.assertFalse(th.is_alive())
         self.assertEqual(server_exc, [])
 
