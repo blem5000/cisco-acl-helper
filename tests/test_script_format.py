@@ -42,41 +42,52 @@ class DeviceHeaderTest(unittest.TestCase):
 
 
 class EntryTextTest(unittest.TestCase):
-    def test_every_no_line_has_its_acl_text_above_it(self):
+    """Each `no` line carries the entry it removes, on the same line.
+
+    IOS keys off the sequence number and ignores the rest, so `no 980 permit
+    ip ...` deletes entry 980 exactly like `no 980` - and stays readable in
+    the paste buffer without a separate comment block.
+    """
+
+    def test_every_no_line_carries_its_entry_text(self):
         out = acl_parser.build_removal_blocks(
             [("10.0.0.1", "sw-a", ACLS)], PC)
         script = out["blocks"][0]["script"]
-        comments = [ln for ln in script.splitlines() if ln.startswith("! ACL")]
-        # one comment per removed entry
-        self.assertEqual(len(comments), 3)
-        self.assertTrue(any("980 permit ip" in c for c in comments))
-        self.assertTrue(any("960 remark Michal Zasina" in c for c in comments))
+        self.assertIn("no 960 remark Michal Zasina", script)
+        self.assertIn(
+            "no 980 permit ip 10.207.156.0 0.0.1.255 host 172.26.56.119",
+            script)
+        self.assertIn("no 1000 remark Michal Zasina (koniec)", script)
 
-    def test_comments_come_before_any_acl_header(self):
-        # a '!' inside an ACL submode is platform-dependent - keep them out
-        out = acl_parser.build_removal_blocks(
-            [("10.0.0.1", "sw-a", ACLS)], PC)
-        lines = out["blocks"][0]["script"].splitlines()
-        first_acl = next(i for i, ln in enumerate(lines)
-                         if ln.startswith("ip access-list"))
-        for i, ln in enumerate(lines):
-            if ln.startswith("!"):
-                self.assertLess(i, first_acl, ln)
+    def test_no_line_without_known_text_stays_bare(self):
+        # a seq with no recorded text must not become 'no 980 None'
+        self.assertEqual(acl_parser._no_line(980, ""), "no 980")
+        self.assertEqual(acl_parser._no_line(980, "980 permit ip any any"),
+                         "no 980 permit ip any any")
 
-    def test_comment_count_matches_no_lines(self):
+    def test_sequence_number_not_repeated(self):
         out = acl_parser.build_removal_blocks(
             [("10.0.0.1", "sw-a", ACLS)], PC)
         script = out["blocks"][0]["script"]
-        nos = [ln for ln in script.splitlines() if ln.startswith("no ")]
-        comments = [ln for ln in script.splitlines() if ln.startswith("! ACL")]
-        self.assertEqual(len(nos), len(comments))
+        self.assertNotIn("no 980 980", script)
+        self.assertIn("no 980 permit ip", script)
 
-    def test_full_line_not_duplicated_number(self):
+    def test_one_no_line_per_removed_entry(self):
+        out = acl_parser.build_removal_blocks(
+            [("10.0.0.1", "sw-a", ACLS)], PC)
+        nos = [ln for ln in out["blocks"][0]["script"].splitlines()
+               if ln.startswith("no ")]
+        self.assertEqual(len(nos), 3)
+        for ln in nos:
+            # seq followed by the entry text, never the seq alone or twice
+            self.assertRegex(ln, r"^no \d+ \S+")
+
+    def test_no_entry_comments_outside_the_blocks(self):
+        # entry text lives on the `no` line now - no '! ACL:' block remains
         out = acl_parser.build_removal_blocks(
             [("10.0.0.1", "sw-a", ACLS)], PC)
         script = out["blocks"][0]["script"]
-        self.assertNotIn("! ACL-BCS-IN: 980: 980", script)
-        self.assertIn("! ACL-BCS-IN: 980 permit ip", script)
+        self.assertNotIn("! ACL-BCS-IN:", script)
 
 
 class OrphanHeaderTest(unittest.TestCase):

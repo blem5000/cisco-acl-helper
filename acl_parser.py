@@ -1502,6 +1502,25 @@ def build_removal_blocks(devices: list[tuple[str, str, dict]], pc_ip: str,
             "kept_brackets": kept_all}
 
 
+def _no_line(seq: int, text: str) -> str:
+    """Build `no <seq> <entry>` - the form used in day-to-day operations.
+
+    IOS acts on the sequence number and ignores whatever follows it, so
+    `no 1450 remark Monitoring Software` deletes entry 1450 just like
+    `no 1450` would, while staying readable in the paste buffer. Keeping
+    the text on the same line also means the script needs no separate
+    comment block, so nothing has to sit above the ACL stanza.
+
+    The entry text is accepted both with and without its own leading
+    number (running-config includes it, parsed remarks do not).
+    """
+    rest = (text or "").strip()
+    m = re.match(r"^\d+\s+(.*)$", rest)
+    if m:
+        rest = m.group(1).strip()
+    return f"no {seq} {rest}".rstrip()
+
+
 def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
                          owner: str = "", owner_of=None,
                          only: str = "",
@@ -1516,7 +1535,6 @@ def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
     """
     want = (only or "").strip().lower()
     per_acl: dict[str, dict] = {}
-    comments: list[str] = []
     stanzas: list[str] = []
     total_aces = 0
     total_remarks = 0
@@ -1541,14 +1559,14 @@ def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
         covers_all.extend(f"{name}: {t}" for t in res["covers"])
         unsequenced_all.extend(f"{name}: {t}" for t in res["unsequenced"])
         if res["deletes"]:
-            # Name what each `no <seq>` removes. All comments go ABOVE every
-            # stanza, so no '!' ever lands inside an ACL submode (where its
-            # meaning depends on platform/version and could exit the block).
-            for _seq, text in res.get("details") or []:
-                comments.append(f"! {name}: {text}")
+            # `no <seq> <entry>` per line: IOS keys off the number and ignores
+            # the rest, so the paste states exactly what is removed without a
+            # separate comment block.
+            by_seq = {seq: text for seq, text in res.get("details") or []}
             stanzas.append(f"ip access-list extended {name}")
-            stanzas.extend(f"no {seq}" for seq in res["deletes"])
-    script = comments + stanzas
+            stanzas.extend(_no_line(seq, by_seq.get(seq, ""))
+                           for seq in res["deletes"])
+    script = stanzas
     return {"script": "\n".join(script) + ("\n" if script else ""),
             "per_acl": per_acl, "removed": total_aces,
             "removed_remarks": total_remarks, "covers": covers_all,
@@ -1666,7 +1684,6 @@ def build_orphan_removal_blocks(devices: list[tuple[str, str, dict]],
     hosts_hit: list[str] = []
     skipped: list[str] = []
     for host, label, acls in devices or []:
-        comments: list[str] = []
         stanzas: list[str] = []
         acls_hit: list[str] = []
         per_acl_orphans: list[str] = []
@@ -1685,12 +1702,14 @@ def build_orphan_removal_blocks(devices: list[tuple[str, str, dict]],
             per_device_unseq.extend(
                 f"{name}: {t}" for t in res["unsequenced"])
             if res["deletes"]:
-                # Comments above every stanza: a '!' inside an ACL submode
-                # is platform-dependent and must not be risked.
-                for _seq, text, _why in res["orphans"]:
-                    comments.append(f"! {name}: {text}")
+                # Same form here: the line itself says what it removes.
+                # Orphan text is the remark body (no keyword), so restore
+                # 'remark' for readability - IOS ignores it after the seq.
+                by_seq = {seq: f"remark {text}"
+                          for seq, text, _why in res["orphans"]}
                 stanzas.append(f"ip access-list extended {name}")
-                stanzas.extend(f"no {seq}" for seq in res["deletes"])
+                stanzas.extend(_no_line(seq, by_seq.get(seq, ""))
+                               for seq in res["deletes"])
         if not stanzas and not any(a for a in acls_hit):
             skipped.append(label or host)
             continue
@@ -1700,8 +1719,7 @@ def build_orphan_removal_blocks(devices: list[tuple[str, str, dict]],
         unsequenced_all.extend(f"{label or host}: {t}"
                                for t in per_device_unseq)
         blocks.append({"host": host, "label": label or host,
-                       "script": _with_device_header(label or host,
-                                                     comments + stanzas),
+                       "script": _with_device_header(label or host, stanzas),
                        "removed_remarks": removed, "acls_hit": acls_hit,
                        "orphans": per_acl_orphans,
                        "unsequenced": per_device_unseq})
