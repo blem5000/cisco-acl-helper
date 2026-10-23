@@ -105,6 +105,18 @@ def save_audit_group(enabled: bool) -> None:
     _write_config(cfg)
 
 
+def load_only_l3() -> bool:
+    """Device lists show only L3 switches (persisted across restarts)."""
+    v = _read_config().get("only_l3", False)
+    return bool(v) if isinstance(v, bool) else False
+
+
+def save_only_l3(enabled: bool) -> None:
+    cfg = _read_config()
+    cfg["only_l3"] = bool(enabled)
+    _write_config(cfg)
+
+
 def load_ports_months() -> str:
     v = _read_config().get("ports_months", "3")
     try:

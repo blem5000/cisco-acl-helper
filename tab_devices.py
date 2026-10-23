@@ -486,6 +486,14 @@ class DevicesTabMixin:
                                  lambda _e: self._dev_search_clear())
         self.lbl_dev_count = ttk.Label(sfr, text="", foreground="gray")
         self.lbl_dev_count.pack(side="left", padx=(8, 0))
+        # Global device-list filter: hide L2 switches. Persisted in config.json
+        # so the choice survives a restart.
+        from app import load_only_l3  # lazy: app imports this mixin
+        self.only_l3_var = tk.BooleanVar(value=load_only_l3())
+        self.chk_only_l3 = ttk.Checkbutton(
+            sfr, text="", variable=self.only_l3_var,
+            command=self._on_only_l3_toggle)
+        self.chk_only_l3.pack(side="right")
         cols = ("audit", "hostname", "group", "host", "user", "port")
         self.tree = ttk.Treeview(self.tab_dev, columns=cols, show="headings", height=14)
         self.tree.pack(fill="both", expand=True, padx=10)
@@ -513,10 +521,18 @@ class DevicesTabMixin:
         self.btn_group = ttk.Button(dbtns, text="", command=self.group_devices)
         self.btn_group.pack(side="left", padx=6)
 
+    def _on_only_l3_toggle(self):
+        """Persist the filter and rebuild every device list at once."""
+        from app import save_only_l3  # lazy: app imports this mixin
+        save_only_l3(self.only_l3_var.get())
+        self._refresh_gen_devices()
+        self.refresh_subnets()
+
     def _apply_devices_language(self):
         S = STRINGS[self.lang]
         self.lbl_dev.configure(text=S["devices_label"])
         self.lbl_dev_search.configure(text=S["dev_search_label"])
+        self.chk_only_l3.configure(text=S["dev_only_l3"])
         self.tree.heading("hostname", text=S["col_hostname"])
         self.tree.heading("group", text=S["col_group"])
         self.tree.heading("host", text=S["col_host"])

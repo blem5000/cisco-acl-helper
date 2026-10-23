@@ -262,14 +262,15 @@ class GeneratorTabMixin:
         """Start devices for IP tracking: L3 switches, primaries by default.
 
         Secondaries of HA pairs are hidden unless 'all devices' is ticked
-        (a trace always starts from the primary of a pair).
+        (a trace always starts from the primary of a pair). The global
+        'L3 only' filter still applies.
         """
         try:
             show_all = bool(self.track_all_var.get())
         except (tk.TclError, AttributeError):
             show_all = True
         out = []
-        for d in self.devices:
+        for d in self._visible_devices():
             if not d.get("host"):
                 continue
             if show_all:
@@ -282,8 +283,29 @@ class GeneratorTabMixin:
             out.append(d)
         return out
 
+    def _visible_devices(self) -> list[dict]:
+        """Devices for the tab dropdowns: L3 first, optionally L3 only.
+
+        The L3 flag marks switches that can route, so they lead every list
+        (they are the ones you usually work on). The optional filter hides
+        L2 switches entirely; its state is persisted in config.json, so the
+        choice survives a restart.
+        """
+        try:
+            only_l3 = bool(self.only_l3_var.get())
+        except (tk.TclError, AttributeError):
+            only_l3 = False
+        devs = [d for d in self.devices if d.get("host")]
+        if only_l3:
+            devs = [d for d in devs if d.get("l3", False)]
+        # L3 first, then alphabetically by label; sorted() is stable, so the
+        # stored order still breaks ties between equal labels.
+        return sorted(devs,
+                      key=lambda d: (0 if d.get("l3", False) else 1,
+                                     self.dev_label(d)))
+
     def _refresh_gen_devices(self):
-        labels = [self.dev_label(d) for d in self.devices if d.get("host")]
+        labels = [self.dev_label(d) for d in self._visible_devices()]
         self.combo_gen_dev.configure(values=labels)
         if self.gen_dev_var.get() not in labels:
             cur = self._lookup_device(self.gen_dev_var.get().strip())

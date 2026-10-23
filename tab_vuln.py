@@ -76,7 +76,7 @@ class VulnTabMixin:
         return reg[0][0] if reg else ""
 
     def _refresh_vuln_devices(self):
-        labels = [self.dev_label(d) for d in self.devices if d.get("host")]
+        labels = [self.dev_label(d) for d in self._visible_devices()]
         try:
             sel = {self.vuln_listbox.get(i)
                    for i in self.vuln_listbox.curselection()}
