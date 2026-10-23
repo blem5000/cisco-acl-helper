@@ -302,6 +302,10 @@ class GeneratorTabMixin:
         if self.audit_dev_var.get() not in labels:
             cur = self._lookup_device(self.audit_dev_var.get().strip())
             self.audit_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
+        self.combo_remove_dev.configure(values=labels)
+        if self.remove_dev_var.get() not in labels:
+            cur = self._lookup_device(self.remove_dev_var.get().strip())
+            self.remove_dev_var.set(self.dev_label(cur) if cur else (labels[0] if labels else ""))
         self.combo_sub_dev.configure(values=labels)
         if self.sub_dev_var.get() not in labels:
             cur = self._lookup_device(self.sub_dev_var.get().strip())
