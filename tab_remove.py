@@ -422,9 +422,9 @@ class RemoveTabMixin:
 
         notes: list[str] = list(res.get("covers") or [])
         notes.extend(res.get("unsequenced") or [])
-        # Orphan run: say which remarks are going, so the paste is verifiable.
-        for item in res.get("orphans") or []:
-            notes.append(item)
+        # Orphan lines are NOT repeated here: each one already appears in its
+        # device block's script, and dumping 50 of them here pushed the
+        # blocks (with their Copy buttons) off the screen entirely.
         # The person's bracket was kept because they still have entries for
         # other machines. Say so - silently keeping it looked like the app
         # simply failed to remove remarks.
@@ -436,12 +436,23 @@ class RemoveTabMixin:
         if res.get("skipped"):
             notes.append(self.T("remove_skipped").format(
                 devices=", ".join(res["skipped"])))
-        if notes:
-            self.lbl_remove_warn.configure(
-                text=self.T("remove_warn_hdr") + "\n  " + "\n  ".join(notes))
-        else:
-            self.lbl_remove_warn.configure(text="")
+        self.lbl_remove_warn.configure(text=self._format_warn_notes(notes))
         self._update_remove_scroll()
+
+    #: The warning area is a summary, never a dump - the blocks below carry
+    #: the detail, and an unbounded label would push them out of the window.
+    MAX_WARN_NOTES = 4
+
+    def _format_warn_notes(self, notes: list[str]) -> str:
+        notes = [n for n in (notes or []) if (n or "").strip()]
+        if not notes:
+            return ""
+        shown = notes[:self.MAX_WARN_NOTES]
+        text = self.T("remove_warn_hdr") + "\n  " + "\n  ".join(shown)
+        rest = len(notes) - len(shown)
+        if rest > 0:
+            text += "\n  " + self.T("remove_warn_more").format(n=rest)
+        return text
 
     def _render_one_block(self, block: dict):
         lf = ttk.LabelFrame(self._remove_blocks_frame,
@@ -599,9 +610,13 @@ class RemoveTabMixin:
         self.lbl_remove_cur = ttk.Label(self.tab_remove, text="")
         self.lbl_remove_cur.pack(anchor="w", padx=10, pady=(2, 2))
         cur_fr = ttk.Frame(self.tab_remove)
-        cur_fr.pack(fill="both", expand=True, padx=10, pady=(0, 4))
+        # Fetched entries keep their fixed height: the result blocks below
+        # (the actual deliverable, each with its Copy button) must get every
+        # spare pixel. Two expanding panels split the window in half and
+        # pushed the blocks out of sight.
+        cur_fr.pack(fill="x", expand=False, padx=10, pady=(0, 4))
         self.txt_remove_cur = tk.Text(cur_fr, wrap="none", font=("Consolas", 10),
-                                      height=7, state="disabled")
+                                      height=6, state="disabled")
         rys = ttk.Scrollbar(cur_fr, orient="vertical",
                             command=self.txt_remove_cur.yview)
         rxs = ttk.Scrollbar(cur_fr, orient="horizontal",
@@ -618,12 +633,17 @@ class RemoveTabMixin:
         self.lbl_remove_stats = ttk.Label(self.tab_remove, text="",
                                           foreground="blue")
         self.lbl_remove_stats.pack(anchor="w", padx=10)
+        self.lbl_remove_prop = ttk.Label(self.tab_remove, text="")
+        self.lbl_remove_prop.pack(anchor="w", padx=10, pady=(4, 2))
+
+        # Warnings are pinned to the BOTTOM and stay compact: they used to sit
+        # ABOVE the blocks and, with dozens of lines, pushed the blocks (and
+        # their Copy buttons) off the window entirely.
         self.lbl_remove_warn = ttk.Label(self.tab_remove, text="",
                                          foreground="#b36b00",
                                          wraplength=980, justify="left")
-        self.lbl_remove_warn.pack(anchor="w", fill="x", padx=10)
-        self.lbl_remove_prop = ttk.Label(self.tab_remove, text="")
-        self.lbl_remove_prop.pack(anchor="w", padx=10, pady=(4, 2))
+        self.lbl_remove_warn.pack(side="bottom", anchor="w", fill="x",
+                                  padx=10, pady=(4, 0))
 
         prop_fr = ttk.Frame(self.tab_remove)
         prop_fr.pack(fill="both", expand=True, padx=10, pady=(0, 8))
