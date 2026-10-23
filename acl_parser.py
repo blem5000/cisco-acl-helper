@@ -1392,12 +1392,16 @@ def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
 
     deletes: list[int] = []
     keep: list[str] = []
+    details: list[tuple[int, str]] = []
     removed_aces = 0
     removed_remarks = 0
     for it in items:
         if it["idx"] in drop:
             if it["seq"] is not None:
                 deletes.append(it["seq"])
+                # keep the full original line so the script can say WHAT
+                # each `no <seq>` removes - a bare number is unverifiable
+                details.append((it["seq"], (entries[it["idx"]] or "").strip()))
             if it["kind"] == "ace":
                 removed_aces += 1
             elif it["kind"] == "remark":
@@ -1416,7 +1420,24 @@ def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
             "removed": removed_aces, "removed_remarks": removed_remarks,
             "covers": covers, "owner": resolved,
             "unsequenced": unsequenced, "kept_bracket": kept_bracket,
-            "block_extra_aces": block_extra_aces}
+            "block_extra_aces": block_extra_aces,
+            "details": sorted(details, key=lambda d: d[0])}
+
+
+def _with_device_header(label: str, lines: list[str]) -> str:
+    """Prefix a paste block with a comment naming its device.
+
+    `!` starts a comment line at top level in IOS, so the header is safe
+    there and makes a single copied blob self-explanatory when several
+    devices were selected (otherwise the blocks look identical).
+
+    An empty script stays empty - a device with nothing to do must not
+    produce a header-only block that looks like real output.
+    """
+    body = [ln for ln in (lines or []) if (ln or "").strip()]
+    if not body:
+        return ""
+    return "\n".join([f"! === {label} ==="] + body) + "\n"
 
 
 def build_removal_blocks(devices: list[tuple[str, str, dict]], pc_ip: str,
@@ -1466,7 +1487,8 @@ def build_removal_blocks(devices: list[tuple[str, str, dict]], pc_ip: str,
         unsequenced_all.extend(
             f"{label or host}: {t}" for t in res["unsequenced"])
         blocks.append({"host": host, "label": label or host,
-                       "script": res["script"],
+                       "script": _with_device_header(label or host,
+                                                     res["script"].splitlines()),
                        "removed": res["removed"],
                        "removed_remarks": res["removed_remarks"],
                        "acls_hit": res["acls_hit"],
@@ -1494,7 +1516,8 @@ def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
     """
     want = (only or "").strip().lower()
     per_acl: dict[str, dict] = {}
-    script: list[str] = []
+    comments: list[str] = []
+    stanzas: list[str] = []
     total_aces = 0
     total_remarks = 0
     covers_all: list[str] = []
@@ -1518,8 +1541,14 @@ def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
         covers_all.extend(f"{name}: {t}" for t in res["covers"])
         unsequenced_all.extend(f"{name}: {t}" for t in res["unsequenced"])
         if res["deletes"]:
-            script.append(f"ip access-list extended {name}")
-            script.extend(f"no {seq}" for seq in res["deletes"])
+            # Name what each `no <seq>` removes. All comments go ABOVE every
+            # stanza, so no '!' ever lands inside an ACL submode (where its
+            # meaning depends on platform/version and could exit the block).
+            for _seq, text in res.get("details") or []:
+                comments.append(f"! {name}: {text}")
+            stanzas.append(f"ip access-list extended {name}")
+            stanzas.extend(f"no {seq}" for seq in res["deletes"])
+    script = comments + stanzas
     return {"script": "\n".join(script) + ("\n" if script else ""),
             "per_acl": per_acl, "removed": total_aces,
             "removed_remarks": total_remarks, "covers": covers_all,
@@ -1637,9 +1666,11 @@ def build_orphan_removal_blocks(devices: list[tuple[str, str, dict]],
     hosts_hit: list[str] = []
     skipped: list[str] = []
     for host, label, acls in devices or []:
-        script: list[str] = []
+        comments: list[str] = []
+        stanzas: list[str] = []
         acls_hit: list[str] = []
         per_acl_orphans: list[str] = []
+        per_device_unseq: list[str] = []
         removed = 0
         for name, entries in (acls or {}).items():
             if want and name.lower() != want:
@@ -1651,22 +1682,29 @@ def build_orphan_removal_blocks(devices: list[tuple[str, str, dict]],
             removed += res["removed_remarks"]
             per_acl_orphans.extend(f"{name}: {text}"
                                    for _seq, text, _why in res["orphans"])
-            unsequenced_all.extend(
-                f"{label or host}: {name}: {t}" for t in res["unsequenced"])
+            per_device_unseq.extend(
+                f"{name}: {t}" for t in res["unsequenced"])
             if res["deletes"]:
-                script.append(f"ip access-list extended {name}")
-                script.extend(f"no {seq}" for seq in res["deletes"])
-        if not script and not any(a for a in acls_hit):
+                # Comments above every stanza: a '!' inside an ACL submode
+                # is platform-dependent and must not be risked.
+                for _seq, text, _why in res["orphans"]:
+                    comments.append(f"! {name}: {text}")
+                stanzas.append(f"ip access-list extended {name}")
+                stanzas.extend(f"no {seq}" for seq in res["deletes"])
+        if not stanzas and not any(a for a in acls_hit):
             skipped.append(label or host)
             continue
         hosts_hit.append(host)
         total += removed
         orphans_all.extend(f"{label or host}: {t}" for t in per_acl_orphans)
+        unsequenced_all.extend(f"{label or host}: {t}"
+                               for t in per_device_unseq)
         blocks.append({"host": host, "label": label or host,
-                       "script": "\n".join(script) + ("\n" if script else ""),
+                       "script": _with_device_header(label or host,
+                                                     comments + stanzas),
                        "removed_remarks": removed, "acls_hit": acls_hit,
                        "orphans": per_acl_orphans,
-                       "unsequenced": list(unsequenced_all)})
+                       "unsequenced": per_device_unseq})
     return {"blocks": blocks, "removed_remarks": total,
             "orphans": orphans_all, "unsequenced": unsequenced_all,
             "hosts_hit": hosts_hit, "skipped": skipped}
