@@ -1525,3 +1525,148 @@ def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
             "removed_remarks": total_remarks, "covers": covers_all,
             "owner": resolved, "acls_hit": list(per_acl),
             "unsequenced": unsequenced_all, "kept_brackets": kept_all}
+
+
+# ---------------------------------------------------------------------------
+# Orphaned remarks (bracket lines with nothing left to describe)
+# ---------------------------------------------------------------------------
+
+def find_orphan_remarks(entries: list[str]) -> dict:
+    """Find remark lines that describe nothing any more.
+
+    Only three unambiguous shapes are reported, so a remark that still
+    covers entries is never touched:
+
+      1. a closing remark with no opening partner
+         (`1000 remark Jan Kowalski (koniec)` alone in the ACL),
+      2. an opening remark with no `(koniec)` and no entries under it
+         (dangling header left by a manual edit),
+      3. a complete bracket that contains no permit/deny at all
+         (`remark X` immediately followed by `remark X (koniec)`).
+
+    Descriptive notes (`OUT: 10.0.0.5 -> cameras`) and any remark that has
+    at least one ACE beneath it are never reported.
+
+    Returns {"deletes": [seq,...], "keep": [lines], "removed_remarks": n,
+             "orphans": [(seq, text, reason), ...], "unsequenced": [...]}.
+    """
+    items: list[dict] = []
+    for idx, raw in enumerate(entries or []):
+        p = parse_ace(raw)
+        if p is None:
+            items.append({"idx": idx, "kind": "other", "seq": None,
+                          "text": (raw or "").strip()})
+            continue
+        items.append({"idx": idx, "kind": "remark" if p["kind"] == "remark"
+                      else "ace", "seq": p.get("seq"), "text": p["text"],
+                      "parsed": p})
+
+    blocks = _owner_brackets(items)
+    matched_close = {b["close_idx"] for b in blocks
+                     if b["close_idx"] is not None}
+
+    drop: dict[int, str] = {}
+
+    def _has_ace(b: dict) -> bool:
+        return any(items[i]["kind"] == "ace" for i in b["idxs"])
+
+    for b in blocks:
+        if b["close_idx"] is not None:
+            # complete bracket: orphan only when it describes nothing
+            if _has_ace(b):
+                continue
+            drop[b["open_idx"]] = "empty bracket"
+            drop[b["close_idx"]] = "empty bracket"
+        else:
+            # no closing remark: orphan only when nothing follows it
+            if _has_ace(b):
+                continue
+            drop[b["open_idx"]] = "no closing remark and no entries"
+
+    # closing remarks that no bracket consumed
+    for it in items:
+        if it["kind"] != "remark" or it["idx"] in matched_close:
+            continue
+        text = (it["text"] or "").strip()
+        low = text.lower()
+        if not low.endswith(OWNER_CLOSE_MARK):
+            continue
+        base = text[:-len(OWNER_CLOSE_MARK)].strip()
+        if not base or not _looks_like_person(base):
+            continue
+        drop[it["idx"]] = "closing remark without opening"
+
+    deletes: list[int] = []
+    keep: list[str] = []
+    orphans: list[tuple] = []
+    unsequenced: list[str] = []
+    removed = 0
+    for it in items:
+        if it["idx"] in drop:
+            if it["seq"] is None:
+                unsequenced.append(it["text"])
+            else:
+                deletes.append(it["seq"])
+                orphans.append((it["seq"], it["text"], drop[it["idx"]]))
+            removed += 1
+        else:
+            keep.append(entries[it["idx"]])
+
+    return {"deletes": sorted(set(deletes)), "keep": keep,
+            "removed_remarks": removed, "orphans": orphans,
+            "unsequenced": unsequenced}
+
+
+def build_orphan_removal_blocks(devices: list[tuple[str, str, dict]],
+                                only: str = "") -> dict:
+    """One removal block per device, clearing that device's orphan remarks.
+
+    `devices` is [(host, label, {acl_name: [entries]}), ...]. `only` limits
+    the run to one ACL (case-insensitive). Devices with nothing to clean are
+    listed under "skipped" instead of producing an empty block.
+
+    Returns {"blocks": [{"host", "label", "script", "removed_remarks",
+    "acls_hit", "orphans", "unsequenced"}], "removed_remarks",
+    "orphans", "unsequenced", "hosts_hit", "skipped"}.
+    """
+    want = (only or "").strip().lower()
+    blocks: list[dict] = []
+    total = 0
+    orphans_all: list[str] = []
+    unsequenced_all: list[str] = []
+    hosts_hit: list[str] = []
+    skipped: list[str] = []
+    for host, label, acls in devices or []:
+        script: list[str] = []
+        acls_hit: list[str] = []
+        per_acl_orphans: list[str] = []
+        removed = 0
+        for name, entries in (acls or {}).items():
+            if want and name.lower() != want:
+                continue
+            res = find_orphan_remarks(entries)
+            if not res["deletes"] and not res["unsequenced"]:
+                continue
+            acls_hit.append(name)
+            removed += res["removed_remarks"]
+            per_acl_orphans.extend(f"{name}: {text}"
+                                   for _seq, text, _why in res["orphans"])
+            unsequenced_all.extend(
+                f"{label or host}: {name}: {t}" for t in res["unsequenced"])
+            if res["deletes"]:
+                script.append(f"ip access-list extended {name}")
+                script.extend(f"no {seq}" for seq in res["deletes"])
+        if not script and not any(a for a in acls_hit):
+            skipped.append(label or host)
+            continue
+        hosts_hit.append(host)
+        total += removed
+        orphans_all.extend(f"{label or host}: {t}" for t in per_acl_orphans)
+        blocks.append({"host": host, "label": label or host,
+                       "script": "\n".join(script) + ("\n" if script else ""),
+                       "removed_remarks": removed, "acls_hit": acls_hit,
+                       "orphans": per_acl_orphans,
+                       "unsequenced": list(unsequenced_all)})
+    return {"blocks": blocks, "removed_remarks": total,
+            "orphans": orphans_all, "unsequenced": unsequenced_all,
+            "hosts_hit": hosts_hit, "skipped": skipped}

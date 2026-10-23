@@ -276,6 +276,32 @@ class RemoveTabMixin:
         self._render_remove_result(
             self._build_result(ip, only, whole_block=whole_block), ip)
 
+    def preview_orphans(self):
+        """Find remark brackets that no longer describe anything.
+
+        No IP needed - this cleans the ACL itself (closing remark without
+        an opening, dangling header, or a bracket with no entries between
+        its remarks).
+        """
+        if self._remove_previewing:
+            return
+        if not self._require_unlocked():
+            return
+        if not self._remove_state_is_current():
+            messagebox.showwarning("ACL", self.T("remove_need_fetch"))
+            return
+        only = "" if self.remove_all_var.get() else self.remove_acl_var.get().strip()
+        if not only and not self.remove_all_var.get():
+            messagebox.showwarning("ACL", self.T("remove_need_acl"))
+            return
+
+        devices = [(host, info["label"], info["acls"])
+                   for host, info in self._remove_fetched.items()]
+        res = acl_parser.build_orphan_removal_blocks(devices, only=only)
+        for block in res.get("blocks") or []:
+            block["kind"] = "orphan"
+        self._render_remove_result(res, self.T("orphan_subject"))
+
     def _build_result(self, ip: str, only: str, owner_of=None,
                       whole_block: bool = False) -> dict:
         devices = [(host, info["label"], info["acls"])
@@ -354,14 +380,26 @@ class RemoveTabMixin:
         self._clear_remove_blocks()
         self._remove_blocks = list(res.get("blocks") or [])
         owner = res.get("owner", "")
+        is_orphan = any(b.get("kind") == "orphan"
+                        for b in self._remove_blocks)
         if not self._remove_blocks:
             if res.get("unsequenced"):
                 self.lbl_remove_stats.configure(
                     text=self.T("remove_unsequenced").format(
                         n=len(res["unsequenced"])))
+            elif is_orphan or "removed" not in res:
+                self.lbl_remove_stats.configure(
+                    text=self.T("orphan_nothing"))
             else:
                 self.lbl_remove_stats.configure(
                     text=self.T("remove_nothing").format(ip=ip))
+        elif is_orphan or "removed" not in res:
+            self.lbl_remove_stats.configure(
+                text=self.T("orphan_stats").format(
+                    remarks=res.get("removed_remarks", 0),
+                    acls=len({a for b in self._remove_blocks
+                              for a in b["acls_hit"]}),
+                    devices=len(self._remove_blocks)))
         elif owner:
             self.lbl_remove_stats.configure(
                 text=self.T("remove_stats").format(
@@ -384,6 +422,9 @@ class RemoveTabMixin:
 
         notes: list[str] = list(res.get("covers") or [])
         notes.extend(res.get("unsequenced") or [])
+        # Orphan run: say which remarks are going, so the paste is verifiable.
+        for item in res.get("orphans") or []:
+            notes.append(item)
         # The person's bracket was kept because they still have entries for
         # other machines. Say so - silently keeping it looked like the app
         # simply failed to remove remarks.
@@ -408,9 +449,14 @@ class RemoveTabMixin:
         lf.pack(fill="x", expand=False, padx=2, pady=(2, 8))
         head = ttk.Frame(lf)
         head.pack(fill="x")
-        info = self.T("remove_block_stats").format(
-            aces=block["removed"], remarks=block["removed_remarks"],
-            acls=", ".join(block["acls_hit"]))
+        if block.get("kind") == "orphan":
+            info = self.T("orphan_block_stats").format(
+                remarks=block["removed_remarks"],
+                acls=", ".join(block["acls_hit"]))
+        else:
+            info = self.T("remove_block_stats").format(
+                aces=block["removed"], remarks=block["removed_remarks"],
+                acls=", ".join(block["acls_hit"]))
         ttk.Label(head, text=info, foreground="blue").pack(side="left")
         script = block["script"]
         ttk.Button(head, text=self.T("remove_copy_block"),
@@ -542,6 +588,9 @@ class RemoveTabMixin:
         self.btn_remove_preview.pack(side="left", padx=(0, 6))
         self.btn_remove_copy = ttk.Button(rb, text="", command=self.copy_remove)
         self.btn_remove_copy.pack(side="left", padx=6)
+        self.btn_remove_orphans = ttk.Button(rb, text="",
+                                             command=self.preview_orphans)
+        self.btn_remove_orphans.pack(side="left", padx=6)
         self.btn_remove_clear = ttk.Button(rb, text="", command=self.clear_remove)
         self.btn_remove_clear.pack(side="left", padx=6)
         self.remove_prog = ttk.Progressbar(rb, mode="indeterminate", length=120)
@@ -616,6 +665,7 @@ class RemoveTabMixin:
         self.chk_remove_owner.configure(text=S["remove_owner_label"])
         self.chk_remove_block.configure(text=S["remove_block_label"])
         self.btn_remove_preview.configure(text=S["remove_preview_btn"])
+        self.btn_remove_orphans.configure(text=S["remove_orphans_btn"])
         self.btn_remove_copy.configure(text=S["remove_copy_all"])
         self.btn_remove_clear.configure(text=S["clear_btn"])
         self.lbl_remove_cur.configure(text=S["remove_current_label"])
