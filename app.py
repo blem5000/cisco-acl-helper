@@ -22,6 +22,7 @@ import vuln_ssh
 import vuln_telnet
 from dialogs import MasterDialog
 from tab_audit import AuditTabMixin
+from tab_remove import RemoveTabMixin
 from tab_ports import PortsTabMixin
 from tab_devices import DevicesTabMixin
 from tab_gen import GeneratorTabMixin
@@ -217,8 +218,8 @@ def _write_config(data: dict) -> None:
 
 
 class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
-          GeneratorTabMixin, TrackTabMixin, AuditTabMixin, PortsTabMixin,
-          VulnTabMixin):
+          GeneratorTabMixin, TrackTabMixin, AuditTabMixin, RemoveTabMixin,
+          PortsTabMixin, VulnTabMixin):
 
     def __init__(self):
         super().__init__()
@@ -243,6 +244,11 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self._audit_proposal = ""
         self._audit_fetching = False
         self._audit_grouping = False
+        self._remove_acls: dict[str, list[str]] = {}
+        self._remove_host = ""
+        self._remove_proposal = ""
+        self._remove_fetching = False
+        self._remove_previewing = False
         self._dhcp_cache: dict = {}  # server -> (timestamp, {ip: info})
         self._ports_fetching = False
         self._ports_report = ""
@@ -322,6 +328,8 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
 
         self._build_audit_tab()
 
+        self._build_remove_tab()
+
         self._build_ports_tab()
 
         self._build_vuln_tab()
@@ -383,13 +391,12 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self.btn_upd_check.pack(anchor="w", padx=14, pady=(8, 0))
 
         # tab order: search, generator, tracking, audit, ports, vuln, ...
-        for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_audit,
-                      self.tab_ports, self.tab_vuln, self.tab_dev, self.tab_sub,
-                      self.tab_set):
+        _order = (self.tab_search, self.tab_gen, self.tab_track, self.tab_audit,
+                  self.tab_remove, self.tab_ports, self.tab_vuln, self.tab_dev,
+                  self.tab_sub, self.tab_set)
+        for _tab in _order:
             self.nb.forget(_tab)
-        for _tab in (self.tab_search, self.tab_gen, self.tab_track, self.tab_audit,
-                      self.tab_ports, self.tab_vuln, self.tab_dev, self.tab_sub,
-                      self.tab_set):
+        for _tab in _order:
             self.nb.add(_tab, text="")
 
         # status bar + small version stamp on the right
@@ -412,6 +419,7 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self.nb.tab(self.tab_gen, text=S["tab_gen"])
         self.nb.tab(self.tab_track, text=S["tab_track"])
         self.nb.tab(self.tab_audit, text=S["tab_audit"])
+        self.nb.tab(self.tab_remove, text=S["tab_remove"])
         self.nb.tab(self.tab_ports, text=S["tab_ports"])
         self.nb.tab(self.tab_vuln, text=S["tab_vuln"])
         self.nb.tab(self.tab_dev, text=S["tab_devices"])
@@ -424,6 +432,7 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
         self._apply_gen_language()
         self._apply_track_language()
         self._apply_audit_language()
+        self._apply_remove_language()
         self._apply_ports_language()
         self._apply_vuln_language()
         self.lbl_lang.configure(text=S["lang_label"])
@@ -1046,6 +1055,18 @@ class App(tk.Tk, SearchTabMixin, DevicesTabMixin, SubnetsTabMixin,
                 elif kind == "audit_group_error":
                     server, err = payload
                     self._finish_audit_group_error(server, err)
+                elif kind == "remove_list":
+                    host, acls = payload
+                    self._finish_remove_fetch(host, acls)
+                elif kind == "remove_error":
+                    host, err = payload
+                    self._finish_remove_fetch_error(host, err)
+                elif kind == "remove_preview":
+                    ip, res = payload
+                    self._finish_remove_preview(ip, res)
+                elif kind == "remove_preview_error":
+                    server, err = payload
+                    self._finish_remove_preview_error(server, err)
                 elif kind == "ports_list":
                     host, months, physical, unused, skipped, clearing = payload
                     self._finish_ports(host, months, physical, unused,

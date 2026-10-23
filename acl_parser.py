@@ -1133,3 +1133,233 @@ def build_grouped_acl_script(pc_ip: str,
             for cam in cams:
                 emit(f"permit ip host {pc_ip} host {cam}")
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Removing one computer's ACL entries (person lost access)
+# ---------------------------------------------------------------------------
+
+OWNER_CLOSE_MARK = "(koniec)"
+
+
+def _ep_match(ep: dict, ip_int: int) -> str | None:
+    """Classify an ACE endpoint against one address.
+
+    "exact"  - this single host (/32 host or /32 wildcard),
+    "covers" - a wider network/wildcard that merely contains it,
+    None     - unrelated, `any`, or an opaque shape (never touched).
+    """
+    kind = (ep or {}).get("kind")
+    if kind == "host":
+        return "exact" if ep.get("ip") == ip_int else None
+    if kind != "net":
+        return None
+    parts = (ep.get("text") or "").split()
+    if len(parts) != 2:
+        return None
+    try:
+        addr = ipaddress.ip_address(parts[0])
+        wildcard = int(ipaddress.ip_address(parts[1]))
+    except ValueError:
+        return None
+    mask = (~wildcard) & 0xFFFFFFFF
+    net = int(addr) & mask
+    if mask == 0xFFFFFFFF:
+        return "exact" if net == ip_int else None
+    return "covers" if (ip_int & mask) == net else None
+
+
+def _owner_brackets(items: list[dict]) -> list[dict]:
+    """Pair `remark <person>` with `remark <person> (koniec)`.
+
+    Only well-formed pairs become brackets, and each opening remark is
+    consumed once. Descriptive remarks (generator notes such as
+    `OUT: 10.0.0.5 -> cameras`) never pair with anything, so they are
+    never mistaken for a person and never removed.
+
+    Returns [{"owner", "open_idx", "close_idx", "idxs"}], idxs being every
+    item index inside the bracket, remarks included.
+    """
+    opens: dict[str, list[int]] = {}
+    blocks: list[dict] = []
+    seen: set[int] = set()
+    for pos, it in enumerate(items):
+        if it["kind"] != "remark":
+            continue
+        text = (it.get("text") or "").strip()
+        low = text.lower()
+        if low.endswith(OWNER_CLOSE_MARK):
+            base = text[:-len(OWNER_CLOSE_MARK)].strip()
+            if not base:
+                continue
+            stack = opens.get(base.lower()) or []
+            while stack and stack[-1] in seen:
+                stack.pop()
+            if not stack:
+                continue  # closing remark without a partner: leave it
+            open_idx = stack.pop()
+            seen.add(open_idx)
+            seen.add(it["idx"])
+            lo = next(p for p, x in enumerate(items) if x["idx"] == open_idx)
+            blocks.append({
+                "owner": base,
+                "open_idx": open_idx,
+                "close_idx": it["idx"],
+                "idxs": [x["idx"] for x in items[lo:pos + 1]],
+            })
+            continue
+        if text:
+            opens.setdefault(low, []).append(it["idx"])
+    return blocks
+
+
+def remove_ip_entries(entries: list[str], pc_ip: str, owner: str = "",
+                      owner_of=None) -> dict:
+    """Remove one computer's entries plus its person's remark bracket.
+
+    `pc_ip` is the address of the person who lost access. Every permit/deny
+    line whose source OR destination is exactly that host is removed
+    (whole-token match via the ACE parser, so an address inside a remark
+    text is never matched). When the person is known - passed as `owner`
+    or resolved through `owner_of(pc_ip)` - the enclosing bracket
+    `remark <person>` / `remark <person> (koniec)` goes too, but only when
+    that person has nothing left in this ACL: someone with a second
+    computer keeps the bracket and the remaining lines.
+
+    Wider lines (CIDR aggregates, wildcards) that merely contain the
+    address carry other hosts too and are never deleted; they are reported
+    under "covers" for manual review. `any`, object-groups and unparsable
+    shapes are never touched.
+
+    Returns {"deletes": [old seq,...] sorted, "keep": [original lines],
+             "removed": number of ACEs, "removed_remarks": number,
+             "covers": [ace_text,...], "owner": resolved name,
+             "unsequenced": [ace_text,...] entries without a seq number,
+             "kept_bracket": person kept because other entries remain}.
+    """
+    ip = (pc_ip or "").strip()
+    try:
+        ip_int = int(ipaddress.ip_address(ip))
+    except ValueError:
+        raise ValueError(f"not an IPv4 address: {pc_ip!r}")
+
+    resolved = clean_owner(owner or "")
+    if not resolved and owner_of is not None:
+        try:
+            resolved = clean_owner(owner_of(ip) or "")
+        except Exception:
+            resolved = ""
+
+    items: list[dict] = []
+    for idx, raw in enumerate(entries or []):
+        p = parse_ace(raw)
+        if p is None:
+            items.append({"idx": idx, "kind": "other", "seq": None,
+                          "text": (raw or "").strip()})
+            continue
+        items.append({"idx": idx, "kind": "remark" if p["kind"] == "remark"
+                      else "ace", "seq": p.get("seq"), "text": p["text"],
+                      "parsed": p})
+
+    exact: set[int] = set()
+    covers: list[str] = []
+    unsequenced: list[str] = []
+    for it in items:
+        if it["kind"] != "ace":
+            continue
+        p = it.get("parsed") or {}
+        if p.get("kind") not in ("permit", "deny"):
+            continue
+        verdict = None
+        for side in ("src", "dst"):
+            r = _ep_match(p.get(side) or {}, ip_int)
+            if r == "exact":
+                verdict = "exact"
+                break
+            if r == "covers" and verdict is None:
+                verdict = "covers"
+        if verdict == "exact":
+            if it["seq"] is None:
+                unsequenced.append(it["text"])
+            else:
+                exact.add(it["idx"])
+        elif verdict == "covers":
+            covers.append(it["text"])
+
+    drop: set[int] = set(exact)
+    kept_bracket = ""
+    for b in _owner_brackets(items):
+        if not any(i in exact for i in b["idxs"]):
+            continue  # no direct hit inside: never guess
+        left = [i for i in b["idxs"]
+                if i not in exact and items[i]["kind"] == "ace"]
+        if left:
+            kept_bracket = kept_bracket or b["owner"]
+            continue  # person still has other entries here
+        drop.update(b["idxs"])
+
+    deletes: list[int] = []
+    keep: list[str] = []
+    removed_aces = 0
+    removed_remarks = 0
+    for it in items:
+        if it["idx"] in drop:
+            if it["seq"] is not None:
+                deletes.append(it["seq"])
+            if it["kind"] == "ace":
+                removed_aces += 1
+            elif it["kind"] == "remark":
+                removed_remarks += 1
+        else:
+            keep.append(entries[it["idx"]])
+
+    if resolved:
+        for b in _owner_brackets(items):
+            if b["owner"].lower() == resolved.lower():
+                if not any(i in exact for i in b["idxs"]):
+                    kept_bracket = kept_bracket or b["owner"]
+                break
+
+    return {"deletes": sorted(set(deletes)), "keep": keep,
+            "removed": removed_aces, "removed_remarks": removed_remarks,
+            "covers": covers, "owner": resolved,
+            "unsequenced": unsequenced, "kept_bracket": kept_bracket}
+
+
+def build_removal_script(acls: dict[str, list[str]], pc_ip: str,
+                         owner: str = "", owner_of=None,
+                         only: str = "") -> dict:
+    """Remove a person's entries across ACLs and build the paste script.
+
+    `only` limits the run to one ACL name (case-insensitive); empty means
+    every fetched ACL. Returns {"script", "per_acl", "removed",
+    "removed_remarks", "covers", "owner", "acls_hit", "unsequenced"}.
+    """
+    want = (only or "").strip().lower()
+    per_acl: dict[str, dict] = {}
+    script: list[str] = []
+    total_aces = 0
+    total_remarks = 0
+    covers_all: list[str] = []
+    unsequenced_all: list[str] = []
+    resolved = ""
+    for name, entries in (acls or {}).items():
+        if want and name.lower() != want:
+            continue
+        res = remove_ip_entries(entries, pc_ip, owner=owner, owner_of=owner_of)
+        resolved = resolved or res["owner"]
+        if not res["deletes"] and not res["unsequenced"]:
+            continue
+        per_acl[name] = res
+        total_aces += res["removed"]
+        total_remarks += res["removed_remarks"]
+        covers_all.extend(f"{name}: {t}" for t in res["covers"])
+        unsequenced_all.extend(f"{name}: {t}" for t in res["unsequenced"])
+        if res["deletes"]:
+            script.append(f"ip access-list extended {name}")
+            script.extend(f"no {seq}" for seq in res["deletes"])
+    return {"script": "\n".join(script) + ("\n" if script else ""),
+            "per_acl": per_acl, "removed": total_aces,
+            "removed_remarks": total_remarks, "covers": covers_all,
+            "owner": resolved, "acls_hit": list(per_acl),
+            "unsequenced": unsequenced_all}
