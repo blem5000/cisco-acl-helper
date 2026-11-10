@@ -359,6 +359,35 @@ class FetchPortsDataTest(unittest.TestCase):
         self.assertEqual(data["poe"], {})
 
 
+class PortsSearchTest(unittest.TestCase):
+    DEVS = [{"hostname": "SW-L3-CORE", "group": "R1", "host": "10.0.0.1",
+             "username": "admin", "l3": True},
+            {"hostname": "", "group": "R1", "host": "10.0.0.2",
+             "username": "admin", "l3": False},
+            {"hostname": "kamera-hala", "group": "R2", "host": "10.0.0.3",
+             "username": "user", "l3": False}]
+
+    def test_finds_all_devices_by_name_and_ip(self):
+        hits = tab_ports.PortsTabMixin.ports_search_hits
+        self.assertEqual(hits(self.DEVS, "l3"), [0])
+        self.assertEqual(hits(self.DEVS, "kamera"), [2])
+        self.assertEqual(hits(self.DEVS, "10.0.0.2"), [1])
+        self.assertEqual(hits(self.DEVS, "10.0.0"), [0, 1, 2])
+        self.assertEqual(hits(self.DEVS, "r1"), [0, 1])
+        self.assertEqual(hits(self.DEVS, "user"), [2])
+        self.assertEqual(hits(self.DEVS, "brak"), [])
+        # empty query keeps every device (the unfiltered dropdown)
+        self.assertEqual(hits(self.DEVS, ""), [0, 1, 2])
+        self.assertEqual(hits([], "x"), [])
+
+    def test_rack_names_filter(self):
+        groups = tab_ports.PortsTabMixin.ports_group_hits
+        self.assertEqual(groups(["R1", "R2"], "r"), ["R1", "R2"])
+        self.assertEqual(groups(["R1", "R2"], "2"), ["R2"])
+        self.assertEqual(groups(["R1", "R2"], ""), ["R1", "R2"])
+        self.assertEqual(groups(["R1"], "x"), [])
+
+
 class TabStructureTest(unittest.TestCase):
     def test_apply_only_uses_widgets_built_at_startup(self):
         # regression: the buttons block once slipped into a method that

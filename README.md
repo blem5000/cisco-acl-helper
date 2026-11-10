@@ -45,7 +45,9 @@ listami ACL na urządzeniach Cisco IOS / IOS-XE. Dwa języki: **polski / English
   (brak ruchu w obie strony wg `Last input/output` z `show interfaces`,
   miesiąc = 30 dni; porty SFP/uplink i management pomijane, do włączenia):
   ile ich jest i które to, ze statusem, ostatnim ruchem i opisem. Próg
-  miesięcy pamiętany między uruchomieniami. Potrafi sprawdzić całą szafę
+  miesięcy pamiętany między uruchomieniami. Lista urządzeń (i szaf) ma
+  wyszukiwanie po nazwie, IP, grupie lub loginie — pasujący fragment
+  od razu zawęża listę, a strzałki przechodzą po wynikach. Potrafi sprawdzić całą szafę
   naraz (raport per switch + suma). Przycisk **Optymalizacja** szacuje,
   ile switchy można wyłączyć: dla szafy porównuje aktywne porty i pobór
   PoE z wolnymi portami, wolnymi portami PoE i pozostałym budżetem PoE
