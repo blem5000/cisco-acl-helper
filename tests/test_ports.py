@@ -388,6 +388,44 @@ class PortsSearchTest(unittest.TestCase):
         self.assertEqual(groups(["R1"], "x"), [])
 
 
+class PortsResolveTest(unittest.TestCase):
+    """Typed text in the editable combos must resolve to one device/rack."""
+
+    @staticmethod
+    def _host():
+        h = tab_ports.PortsTabMixin()
+        h._ports_all_devices = [dict(d) for d in PortsSearchTest.DEVS]
+        h.devices = [dict(d) for d in PortsSearchTest.DEVS]
+        h._ports_all_groups = ["R1", "R2"]
+        h.dev_label = lambda d: (
+            f"{d.get('hostname')} {d.get('host')}".strip()
+            if d.get("hostname") else d.get("host", ""))
+        h._lookup_device = lambda sel: next(
+            (d for d in h.devices
+             if d.get("host") == (sel or "").strip()
+             or h.dev_label(d) == (sel or "").strip()), None)
+        return h
+
+    def test_device_by_host_name_and_unique_partial(self):
+        h = self._host()
+        self.assertEqual(h._ports_resolve_device("10.0.0.2")["host"],
+                         "10.0.0.2")
+        self.assertEqual(h._ports_resolve_device("kamera")["host"],
+                         "10.0.0.3")
+        self.assertEqual(h._ports_resolve_device("SW-L3")["host"],
+                         "10.0.0.1")
+        # ambiguous fragment and empty text select nothing
+        self.assertIsNone(h._ports_resolve_device("10.0.0"))
+        self.assertIsNone(h._ports_resolve_device(""))
+
+    def test_group_by_name_and_unique_partial(self):
+        h = self._host()
+        self.assertEqual(h._ports_resolve_group("R1"), "R1")
+        self.assertEqual(h._ports_resolve_group("r2"), "R2")
+        self.assertIsNone(h._ports_resolve_group("R"))
+        self.assertIsNone(h._ports_resolve_group(""))
+
+
 class TabStructureTest(unittest.TestCase):
     def test_apply_only_uses_widgets_built_at_startup(self):
         # regression: the buttons block once slipped into a method that
@@ -409,8 +447,9 @@ class TabStructureTest(unittest.TestCase):
             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
                     and n.value.id == "self" and isinstance(n.ctx, ast.Load):
                 used.add(n.attr)
-        # self.lang is set by App, not the tab
-        self.assertEqual(used - built, {"lang"})
+        # self.lang is set by App, not the tab; _ports_filter_values is a
+        # method (not a widget), safe to call from the language pass
+        self.assertEqual(used - built, {"lang", "_ports_filter_values"})
 
 
 if __name__ == "__main__":

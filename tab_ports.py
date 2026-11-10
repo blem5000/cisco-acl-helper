@@ -97,66 +97,155 @@ class PortsTabMixin:
             return names
         return [g for g in names if q in str(g).lower()]
 
-    def _ports_filtered_choices(self) -> tuple[list[str], tk.StringVar]:
-        """Matching labels and the combo var for the active scope.
+    _PORTS_NAV_KEYS = frozenset({
+        "Up", "Down", "Left", "Right", "Home", "End", "Prior", "Next",
+        "Return", "KP_Enter", "Escape", "Tab", "ISO_Left_Tab",
+        "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+    })
 
-        Also refreshes the active combobox values, so the dropdown itself
-        only shows what the search matched (all items when it is empty).
-        """
-        query = self.ports_search_var.get().strip()
+    def _ports_scope_key(self) -> str:
         try:
-            rack = self.ports_scope_var.get() == "rack"
+            return "rack" if self.ports_scope_var.get() == "rack" else "dev"
         except (tk.TclError, AttributeError):
-            rack = False
-        if rack:
-            all_groups = list(getattr(self, "_ports_all_groups", []))
-            values = self.ports_group_hits(all_groups, query)
-            self.combo_ports_group.configure(values=values)
-            return values, self.ports_group_var
+            return "dev"
+
+    def _save_ports_scope_setting(self):
+        """Persist scope/rack, but not transient text typed into the combo."""
+        group = self.ports_group_var.get().strip()
+        if (self._ports_scope_key() == "rack" and group
+                and group not in getattr(self, "_ports_all_groups", [])):
+            return  # partial name while typing; saved once it is committed
+        # lazy import: app.py imports this mixin, so top-level would cycle
+        from app import save_ports_scope
+        save_ports_scope(self.ports_scope_var.get(), group)
+
+    def _ports_active_pair(self) -> tuple[ttk.Combobox, tk.StringVar]:
+        """The combobox and its text variable for the active scope."""
+        if self._ports_scope_key() == "rack":
+            return self.combo_ports_group, self.ports_group_var
+        return self.combo_ports_dev, self.ports_dev_var
+
+    def _ports_all_choices(self) -> list[str]:
+        """Every device label or rack name (no filtering)."""
+        if self._ports_scope_key() == "rack":
+            return list(getattr(self, "_ports_all_groups", []))
+        return [self.dev_label(d)
+                for d in getattr(self, "_ports_all_devices", [])]
+
+    def _ports_match_choices(self, query: str) -> list[str]:
+        """Labels matching the typed text; empty text keeps all items."""
+        if self._ports_scope_key() == "rack":
+            return self.ports_group_hits(
+                list(getattr(self, "_ports_all_groups", [])), query)
         devs = list(getattr(self, "_ports_all_devices", []))
-        idxs = self.ports_search_hits(devs, query)
-        values = [self.dev_label(devs[i]) for i in idxs]
-        self.combo_ports_dev.configure(values=values)
-        return values, self.ports_dev_var
+        return [self.dev_label(devs[i])
+                for i in self.ports_search_hits(devs, query)]
 
-    def _ports_apply_search(self, pos: int | None = None):
-        """Select the first (or `pos`-th) match and update the counter."""
-        values, var = self._ports_filtered_choices()
-        if not values:
-            var.set("")
-            self.lbl_ports_search_count.configure(
-                text=(self.T("ports_search_none")
-                      if self.ports_search_var.get().strip() else ""))
-            return
-        if pos is None:
-            try:
-                pos = values.index(var.get())
-            except ValueError:
-                pos = 0
-        pos %= len(values)
-        var.set(values[pos])
-        if self.ports_search_var.get().strip():
-            self.lbl_ports_search_count.configure(
-                text=f"{pos + 1}/{len(values)}")
-        else:
-            self.lbl_ports_search_count.configure(text="")
-
-    def _ports_search_step(self, delta: int):
-        """Up/Down/Return in the search box: previous/next match (wraps)."""
-        values, var = self._ports_filtered_choices()
-        if not values:
-            self._ports_apply_search()
-            return
+    def _ports_filter_values(self, query: str):
+        """Filter the open dropdown while keeping the typed text intact."""
+        combo, _var = self._ports_active_pair()
+        values = self._ports_match_choices(query)
         try:
-            cur = values.index(var.get())
-        except ValueError:
-            cur = -1
-        self._ports_apply_search(cur + delta)
+            combo.configure(values=values)
+        except tk.TclError:
+            return
+        text = (query or "").strip()
+        if not text:
+            self.lbl_ports_search_count.configure(
+                text=self.T("ports_search_hint"))
+        elif values:
+            self.lbl_ports_search_count.configure(
+                text=f"{len(values)}/{len(self._ports_all_choices())}")
+        else:
+            self.lbl_ports_search_count.configure(
+                text=self.T("ports_search_none"))
 
-    def _ports_search_key(self, delta: int) -> str:
-        """Entry key handler: step through matches, swallow the key."""
-        self._ports_search_step(delta)
+    def _ports_combo_key(self, event):
+        """Type-ahead in the editable combobox: filter by name/IP."""
+        if event.keysym in self._PORTS_NAV_KEYS:
+            return None
+        _combo, var = self._ports_active_pair()
+        self._ports_filter_values(var.get())
+        return None
+
+    def _ports_remember(self, key: str, label: str):
+        if not hasattr(self, "_ports_last"):
+            self._ports_last = {}
+        self._ports_last[key] = label
+
+    def _ports_combo_accept(self, _event=None):
+        """Enter: commit the exact/unique/first match, then unfilter."""
+        _combo, var = self._ports_active_pair()
+        text = var.get().strip()
+        matches = self._ports_match_choices(text)
+        chosen = text if text in matches else (matches[0] if matches else "")
+        if chosen:
+            var.set(chosen)
+            self._ports_remember(self._ports_scope_key(), chosen)
+            self._ports_filter_values("")
+        else:
+            self._ports_filter_values(text)
         return "break"
+
+    def _ports_combo_selected(self, _event=None):
+        """Pick from the dropdown: remember it and restore the full list."""
+        _combo, var = self._ports_active_pair()
+        chosen = var.get().strip()
+        if chosen:
+            self._ports_remember(self._ports_scope_key(), chosen)
+        self._ports_filter_values("")
+
+    def _ports_combo_escape(self, _event=None):
+        """Esc: restore the last committed choice and the full list."""
+        key = self._ports_scope_key()
+        _combo, var = self._ports_active_pair()
+        var.set(getattr(self, "_ports_last", {}).get(key, ""))
+        self._ports_filter_values("")
+        return "break"
+
+    def _ports_resolve_device(self, text: str) -> dict | None:
+        """Typed host/label, or a partial name/IP matching exactly one device."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        dev = self._lookup_device(text)
+        if dev is not None:
+            return dev
+        devs = list(getattr(self, "_ports_all_devices", []))
+        hits = [devs[i] for i in self.ports_search_hits(devs, text)]
+        return dict(hits[0]) if len(hits) == 1 else None
+
+    def _ports_resolve_group(self, text: str) -> str | None:
+        """Typed rack name, or a partial match unique among the racks."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        groups = list(getattr(self, "_ports_all_groups", []))
+        if text in groups:
+            return text
+        hits = self.ports_group_hits(groups, text)
+        return hits[0] if len(hits) == 1 else None
+
+    def _ports_sync_selection(self):
+        """Keep the active combo valid after a devices/racks refresh."""
+        choices = self._ports_all_choices()
+        if not choices:
+            return  # nothing loaded yet: keep the saved scope selection
+        key = self._ports_scope_key()
+        _combo, var = self._ports_active_pair()
+        text = var.get().strip()
+        if text not in choices:
+            if key == "rack":
+                text = self._ports_resolve_group(text) or ""
+            else:
+                dev = self._ports_resolve_device(text)
+                text = self.dev_label(dev) if dev else ""
+            if not text:
+                text = choices[0]
+            var.set(text)
+        if text:
+            self._ports_remember(key, text)
+        self._ports_filter_values("")
 
     def _set_ports_text(self, content: str):
         self.txt_ports.configure(state="normal")
@@ -209,13 +298,16 @@ class PortsTabMixin:
             messagebox.showwarning("ACL", self.T("ports_bad_months"))
             return None
         if self.ports_scope_var.get() == "rack":
-            group = self.ports_group_var.get().strip()
+            group = self._ports_resolve_group(self.ports_group_var.get())
+            if group is None:
+                messagebox.showwarning("ACL", self.T("ports_need_group"))
+                return None
             devs = rack_devices(self.devices, group)
             if not devs:
                 messagebox.showwarning("ACL", self.T("ports_need_group"))
                 return None
         else:
-            dev = self._lookup_device(self.ports_dev_var.get().strip())
+            dev = self._ports_resolve_device(self.ports_dev_var.get())
             if dev is None:
                 messagebox.showwarning("ACL", self.T("ports_need_dev"))
                 return None
@@ -558,13 +650,14 @@ class PortsTabMixin:
         # filled by _refresh_gen_devices(); the search filters these lists
         self._ports_all_devices: list[dict] = []
         self._ports_all_groups: list[str] = []
+        self._ports_last: dict[str, str] = {}
         pf = ttk.Frame(self.tab_ports)
         pf.pack(fill="x", padx=10, pady=10)
         self.lbl_ports_dev = ttk.Label(pf, text="")
         self.lbl_ports_dev.grid(row=0, column=0, sticky="w")
         self.ports_dev_var = tk.StringVar(value="")
         self.combo_ports_dev = ttk.Combobox(pf, textvariable=self.ports_dev_var,
-                                            state="readonly", width=24, values=[])
+                                            state="normal", width=34, values=[])
         self.combo_ports_dev.grid(row=1, column=0, sticky="w", pady=4)
         self.lbl_ports_months = ttk.Label(pf, text="")
         self.lbl_ports_months.grid(row=0, column=1, sticky="w", padx=(16, 0))
@@ -595,7 +688,7 @@ class PortsTabMixin:
                                              variable=self.ports_sfp_var)
         self.chk_ports_sfp.grid(row=2, column=0, columnspan=4, sticky="w",
                                 pady=(6, 0))
-        from app import load_ports_scope, save_ports_scope  # lazy: cycle
+        from app import load_ports_scope  # lazy: cycle
         scope, grp = load_ports_scope()
         self.ports_scope_var = tk.StringVar(value=scope)
         self.ports_group_var = tk.StringVar(value=grp)
@@ -610,39 +703,24 @@ class PortsTabMixin:
             command=self._sync_ports_scope)
         self.radio_ports_rack.pack(side="left", padx=(12, 0))
         self.combo_ports_group = ttk.Combobox(
-            scope_fr, textvariable=self.ports_group_var, state="readonly",
+            scope_fr, textvariable=self.ports_group_var, state="normal",
             width=24, values=[])
         self.combo_ports_group.pack(side="left", padx=(8, 0))
-        search_fr = ttk.Frame(pf)
-        search_fr.grid(row=4, column=0, columnspan=4, sticky="w",
-                       pady=(6, 0))
-        self.lbl_ports_search = ttk.Label(search_fr, text="")
-        self.lbl_ports_search.pack(side="left")
-        self.ports_search_var = tk.StringVar(value="")
-        self.ent_ports_search = ttk.Entry(search_fr,
-                                          textvariable=self.ports_search_var,
-                                          width=28)
-        self.ent_ports_search.pack(side="left", padx=(6, 0))
-        self.lbl_ports_search_count = ttk.Label(search_fr, text="",
+        # the combobox is the search box: typing filters its own dropdown
+        for combo in (self.combo_ports_dev, self.combo_ports_group):
+            combo.bind("<KeyRelease>", self._ports_combo_key)
+            combo.bind("<Return>", self._ports_combo_accept)
+            combo.bind("<KP_Enter>", self._ports_combo_accept)
+            combo.bind("<Escape>", self._ports_combo_escape)
+            combo.bind("<<ComboboxSelected>>", self._ports_combo_selected)
+        self.lbl_ports_search_count = ttk.Label(pf, text="",
                                                 foreground="gray")
-        self.lbl_ports_search_count.pack(side="left", padx=(8, 0))
-        self.ports_search_var.trace_add(
-            "write", lambda *_a: self._ports_apply_search(
-                None if not self.ports_search_var.get().strip() else 0))
-        self.ent_ports_search.bind("<Down>",
-                                   lambda _e: self._ports_search_key(1))
-        self.ent_ports_search.bind("<Up>",
-                                   lambda _e: self._ports_search_key(-1))
-        self.ent_ports_search.bind("<Return>",
-                                   lambda _e: self._ports_search_key(1))
-        self.ent_ports_search.bind("<Escape>",
-                                   lambda _e: self.ports_search_var.set(""))
+        self.lbl_ports_search_count.grid(row=4, column=0, columnspan=4,
+                                         sticky="w", pady=(6, 0))
         self.ports_scope_var.trace_add(
-            "write", lambda *_a: save_ports_scope(
-                self.ports_scope_var.get(), self.ports_group_var.get()))
+            "write", lambda *_a: self._save_ports_scope_setting())
         self.ports_group_var.trace_add(
-            "write", lambda *_a: save_ports_scope(
-                self.ports_scope_var.get(), self.ports_group_var.get()))
+            "write", lambda *_a: self._save_ports_scope_setting())
         self._sync_ports_scope()
 
         pbtns = ttk.Frame(self.tab_ports)
@@ -685,12 +763,12 @@ class PortsTabMixin:
             rack = False
         try:
             self.combo_ports_dev.configure(state="disabled" if rack
-                                           else "readonly")
-            self.combo_ports_group.configure(state="readonly" if rack
+                                           else "normal")
+            self.combo_ports_group.configure(state="normal" if rack
                                              else "disabled")
         except tk.TclError:
             pass
-        self._ports_apply_search()
+        self._ports_sync_selection()
 
     def _refresh_ports_devices(self):
         """All devices for the device scope + search (ignores 'L3 only').
@@ -706,12 +784,11 @@ class PortsTabMixin:
         """Full device list + rack names for the ports combos and search."""
         self._refresh_ports_devices()
         self._ports_all_groups = rack_names(self.devices)
-        self._ports_apply_search()
+        self._ports_sync_selection()
 
     def _apply_ports_language(self):
         S = STRINGS[self.lang]
         self.lbl_ports_dev.configure(text=S["ports_dev_label"])
-        self.lbl_ports_search.configure(text=S["ports_search_label"])
         self.lbl_ports_months.configure(text=S["ports_months_label"])
         self.btn_ports_check.configure(text=S["ports_check_btn"])
         self.btn_ports_optimize.configure(text=S["ports_optimize_btn"])
@@ -721,3 +798,4 @@ class PortsTabMixin:
         self.radio_ports_dev.configure(text=S["ports_scope_dev"])
         self.radio_ports_rack.configure(text=S["ports_scope_rack"])
         self.lbl_ports_results.configure(text=S["results_label"])
+        self._ports_filter_values("")
